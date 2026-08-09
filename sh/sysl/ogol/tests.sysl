@@ -1,0 +1,298 @@
+module sh.sysl.ogol
+@tests
+
+import sysl.buf.{Buf, buf}
+
+// The language's own tests, run on the host by `sysl test .`.
+//
+// **Everything is asserted through the transcript rather than through the tree**, because the tree is
+// an implementation and the transcript is the promise: what a person typing this sees. The two helpers
+// below are the whole of the scaffolding -- one for what a program printed, one for what its last line
+// came to -- and both answer a string beginning `error:` where something was refused, so that a
+// refusal is asserted the same way an answer is.
+
+// A source text as the tokens it lexes to, spelled and joined. It pins the one thing the lexer decides
+// that nothing downstream can recover: where the boundaries are.
+private lexes(src: string) -> string
+    tokens(src) match
+        Ok(ts) ->
+            var out = ""
+
+            for i in 0..<ts.len()
+                ts.at(i) match
+                    Eof -> ()
+                    _ ->
+                        if out != "" then out = out + " "
+                        out = out + spell(ts.at(i))
+
+            out
+        Err(f) -> s"error: ${describe(f)}"
+end lexes
+
+// What a program printed, one line per `print`, joined by newlines.
+private printed(src: string) -> string
+    var i = ogol()
+
+    i.quiet = true
+
+    run(i, src) match
+        Ok(_) -> transcript(i)
+        Err(f) -> s"error: ${describe(f)}"
+end printed
+
+// What a program's last line came to, which is what a console echoes.
+private value(src: string) -> string
+    var i = ogol()
+
+    i.quiet = true
+
+    run(i, src) match
+        Ok(v) -> render(v)
+        Err(f) -> s"error: ${describe(f)}"
+end value
+
+// --- Reading ------------------------------------------------------------------------------------
+
+@test
+a_name_and_a_number_are_two_tokens() =
+    assert_eq(lexes("print 42"), "print 42")
+
+@test
+a_quoted_word_and_a_parameter_keep_their_marks() =
+    assert_eq(lexes("to twice :n"), "to twice :n")
+
+@test
+arithmetic_signs_break_a_name_apart() =
+    assert_eq(lexes("n-1"), "n - 1")
+
+@test
+a_comment_runs_to_the_end_of_the_line() =
+    assert_eq(lexes("print 1 ; and the rest"), "print 1")
+
+@test
+a_newline_is_a_token() =
+    assert_eq(lexes("print 1\nprint 2"), "print 1 the end of the line print 2")
+
+@test
+a_minus_with_a_space_on_its_left_only_is_refused() =
+    assert_eq(lexes("x- y"),
+              "error: '-' is written '- ' with a space each side to subtract, or '-' with none")
+
+@test
+a_digit_run_that_does_not_end_at_a_delimiter_is_refused() =
+    assert_eq(lexes("12x"), "error: 'x' cannot follow a number")
+
+// --- Values and arithmetic ----------------------------------------------------------------------
+
+@test
+a_number_prints_as_itself() =
+    assert_eq(printed("print 42"), "42")
+
+@test
+a_quoted_word_prints_without_its_quote() =
+    assert_eq(printed("print \"hello"), "hello")
+
+@test
+arithmetic_is_infix_and_multiplication_binds_tighter() =
+    assert_eq(printed("print 2 + 3 * 4"), "14")
+
+@test
+parentheses_override_precedence() =
+    assert_eq(printed("print (2 + 3) * 4"), "20")
+
+@test
+comparisons_answer_a_boolean() =
+    assert_eq(printed("print 3 < 4"), "true")
+
+@test
+equality_across_two_kinds_is_false_rather_than_an_error() =
+    assert_eq(printed("print 1 = \"1"), "false")
+
+@test
+division_is_by_integers_and_by_zero_is_refused() =
+    assert_eq(printed("print 7 / 2"), "3")
+
+@test
+dividing_by_zero_says_so() =
+    assert_eq(printed("print 1 / 0"), "error: that divides by zero")
+
+@test
+arithmetic_on_a_word_names_the_side_that_is_wrong() =
+    assert_eq(printed("print \"a + 1"), "error: '+' works on numbers, and the left side is a word")
+
+// --- The minus ----------------------------------------------------------------------------------
+
+@test
+a_minus_with_space_on_both_sides_subtracts() =
+    assert_eq(printed("print 5 - 1"), "4")
+
+@test
+a_minus_with_space_on_neither_side_also_subtracts() =
+    assert_eq(printed("set n 5\nprint n-1"), "4")
+
+@test
+a_minus_that_opens_an_argument_is_a_negative_number() =
+    assert_eq(printed("print -1"), "-1")
+
+// **The claim the whole spacing rule rests on**: the two readings differ in argument count by exactly
+// one, so the wrong one is refused rather than answered. This is the check that says the backstop is
+// real and not merely plausible.
+@test
+the_two_readings_of_a_minus_differ_by_one_argument_so_the_wrong_one_is_caught() =
+    assert_eq(printed("set n 5\nprint n -1"),
+              "error: 'print' needs 1 argument, got 2 arguments -- '-1' reads as a negative number, " +
+              "and '- 1' as a subtraction")
+
+// The same shape on a two-argument command, which is the example the language was designed against.
+@test
+a_surplus_on_set_is_reported_against_set() =
+    assert_eq(printed("set level 3\nset level level -1"),
+              "error: 'set' needs 2 arguments, got 3 arguments -- '-1' reads as a negative number, " +
+              "and '- 1' as a subtraction")
+
+// --- Variables ----------------------------------------------------------------------------------
+
+@test
+a_variable_is_set_and_read_by_its_bare_name() =
+    assert_eq(printed("set count 7\nprint count"), "7")
+
+@test
+a_variable_can_be_written_in_terms_of_itself() =
+    assert_eq(printed("set count 7\nset count count + 1\nprint count"), "8")
+
+@test
+a_name_nobody_has_bound_is_reported_by_name() =
+    assert_eq(printed("print count"), "error: I do not know 'count'")
+
+@test
+a_built_in_name_cannot_be_used_as_a_variable() =
+    assert_eq(printed("set print 1"),
+              "error: 'print' is built in and cannot be used as a variable")
+
+// --- Blocks -------------------------------------------------------------------------------------
+
+@test
+repeat_runs_its_block_that_many_times() =
+    assert_eq(printed("repeat 3 [ print 1 ]"), "1\n1\n1")
+
+@test
+repeat_of_none_runs_its_block_not_at_all() =
+    assert_eq(printed("repeat 0 [ print 1 ]"), "")
+
+@test
+a_block_may_span_lines() =
+    assert_eq(printed("repeat 2 [\n  print 1\n  print 2\n]"), "1\n2\n1\n2")
+
+@test
+if_runs_its_block_only_when_the_test_holds() =
+    assert_eq(printed("if 1 < 2 [ print \"yes ]\nif 2 < 1 [ print \"no ]"), "yes")
+
+@test
+ifelse_chooses_between_two_blocks() =
+    assert_eq(printed("ifelse 2 < 1 [ print \"yes ] [ print \"no ]"), "no")
+
+@test
+a_test_that_is_not_a_boolean_says_so() =
+    assert_eq(printed("if 1 [ print 1 ]"), "error: 'if' needs a true or a false, and got a number")
+
+@test
+a_block_is_not_a_value() =
+    assert_eq(printed("print [ print 1 ]"),
+              "error: a '[ ]' block is something to run, not a value — 'repeat', 'if' and 'ifelse' " +
+              "are what take one")
+
+// --- Procedures ---------------------------------------------------------------------------------
+
+@test
+a_procedure_is_defined_and_called() =
+    assert_eq(printed("to greet\n  print \"hi\nend\ngreet"), "hi")
+
+@test
+a_procedure_takes_parameters_declared_with_a_colon_and_read_bare() =
+    assert_eq(printed("to double :n\n  output n * 2\nend\nprint double 5"), "10")
+
+@test
+a_definition_and_its_call_fit_on_one_line() =
+    assert_eq(printed("to double :n output n * 2 end\nprint double 5"), "10")
+
+@test
+a_procedure_may_call_itself() =
+    assert_eq(printed("to fact :n\n  if n = 0 [ output 1 ]\n  output n * fact n - 1\nend\nprint fact 10"),
+              "3628800")
+
+@test
+stop_leaves_a_procedure_early() =
+    assert_eq(printed("to count_to :n\n  set i 0\n  repeat 100 [ set i i + 1 if i > n [ stop ] print i ]\nend\ncount_to 3"),
+              "1\n2\n3")
+
+@test
+a_parameter_is_local_and_a_global_of_the_same_name_survives() =
+    assert_eq(printed("set n 1\nto show :n\n  print n\nend\nshow 99\nprint n"), "99\n1")
+
+@test
+a_redefinition_replaces_what_was_there() =
+    assert_eq(printed("to f\n  print 1\nend\nto f\n  print 2\nend\nf"), "2")
+
+@test
+a_built_in_cannot_be_redefined() =
+    assert_eq(printed("to print :x\n  output x\nend"),
+              "error: 'print' is built in and cannot be redefined")
+
+@test
+a_procedure_that_outputs_nothing_cannot_be_used_as_a_value() =
+    assert_eq(printed("to greet\n  print \"hi\nend\nprint greet"),
+              "error: 'print' needs a value, and what it was given produces none")
+
+@test
+runaway_recursion_is_reported_rather_than_taking_the_stack() =
+    assert_eq(printed("to loop_forever\n  loop_forever\nend\nloop_forever"),
+              "error: 'loop_forever' has called itself 128 deep, which is further than this can follow")
+
+// --- Arity --------------------------------------------------------------------------------------
+
+@test
+a_command_short_of_an_argument_says_how_many_it_wanted() =
+    assert_eq(printed("print"), "error: 'print' needs 1 argument, got 0 arguments")
+
+@test
+a_procedure_is_read_at_the_arity_its_title_line_gave_it() =
+    assert_eq(printed("to add :a :b\n  output a + b\nend\nprint add 1 2"), "3")
+
+// --- What a console needs -----------------------------------------------------------------------
+
+// **The distinction a REPL is built on.** An unclosed bracket and an unfinished definition are not
+// mistakes -- they are a line that has not finished -- and a console tells them apart from a real
+// refusal by which side of `Fault` it lands on.
+@test
+an_unclosed_block_asks_for_more_rather_than_complaining() =
+    assert_eq(printed("repeat 5 ["), "error: the line stops in the middle of something")
+
+@test
+a_definition_with_no_end_asks_for_more() =
+    assert_eq(printed("to f\n  print 1"), "error: the line stops in the middle of something")
+
+@test
+a_stray_close_bracket_is_a_refusal_rather_than_a_request_for_more() =
+    assert_eq(printed("]"), "error: ']' closes something that was never opened")
+
+// The console echoes the last thing a line came to, which is why `run` answers a value at all.
+@test
+a_line_that_is_an_expression_answers_with_its_value() =
+    assert_eq(value("2 + 3"), "5")
+
+@test
+a_line_that_is_a_command_answers_with_nothing() =
+    assert_eq(value("print 1"), "")
+
+// State survives from one call to the next, which is the whole reason an interpreter is a value.
+@test
+a_procedure_defined_on_one_line_is_there_on_the_next() =
+    var i = ogol()
+
+    i.quiet = true
+
+    run(i, "to double :n output n * 2 end")
+    run(i, "set x 4")
+    run(i, "print double x")
+
+    assert_eq(transcript(i), "8")

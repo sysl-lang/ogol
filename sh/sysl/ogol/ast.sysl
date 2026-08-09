@@ -1,0 +1,81 @@
+module sh.sysl.ogol
+
+import sysl.buf.{Buf, buf}
+
+// What a line comes to once it has been read, and the dictionary that makes reading possible at all.
+//
+// **The tree is small because the grammar is arity-driven.** Logo writes `print double count` with no
+// brackets and no commas, and the only thing that makes that readable is knowing, before the arguments
+// are looked at, that `double` takes one. So a call carries exactly as many arguments as its name
+// promised, and there is no node for "a list of things whose shape is decided later".
+//
+// **A bare name is a call, and a variable is a call of no arguments.** Ogol drops Logo's two sigils --
+// no `"x` for a name and no `:x` for its value -- which leaves one spelling doing both jobs and one
+// question to answer: how many arguments does `count` take? A name the parser has never heard of takes
+// none, which is exactly right, because that is what a variable is. Deciding it that way rather than
+// by tracking what is bound means the reader needs no knowledge of what has run, and a misspelling
+// still lands as a sentence about `count` rather than as a shape nobody meant.
+
+// A statement, and an expression, which in Logo are the same thing seen from two sides: a command is a
+// call whose value is `Nothing` and an operation is a call whose value is not, and nothing about the
+// syntax distinguishes them.
+enum Expr
+    Literal(v: Value)
+    Block(body: &Buf[&Expr])
+    Call(name: string, args: &Buf[&Expr])
+    Assign(name: string, value: &Expr)
+    Binary(op: string, left: &Expr, right: &Expr)
+    Negate(inner: &Expr)
+    Define(proc: &Proc)
+end Expr
+
+// A procedure the user wrote. `params` is the whole of its interface -- Ogol has no optional or
+// variadic arguments, because a name whose arity is not a single number cannot be read without
+// brackets, and reading without brackets is the point.
+struct Proc
+    name: string
+    params: &Buf[string]
+    body: &Buf[&Expr]
+
+    arity(self) -> usize = self.params.len()
+end Proc
+
+// Every procedure the interpreter knows.
+//
+// **The parser reads this, which is the part that is easy to get backwards.** A name's arity has to be
+// known before its arguments can be found, so a definition is entered here the moment its title line
+// is read and *before* its body is parsed -- otherwise a procedure could not call itself, which is the
+// second thing anybody writes.
+struct Procs
+    items: &Buf[&Proc]
+
+    find(self, name: string) -> Option[&Proc]
+        for i in 0..<self.items.len()
+            if self.items.at(i).name == name then return Some(self.items.at(i))
+
+        None
+    end find
+
+    // A redefinition replaces what was there, so a procedure can be corrected at the keyboard without
+    // the old one lingering under the new. It is the same rule Logo's `to` has always had.
+    define(*self, p: &Proc)
+        for i in 0..<self.items.len()
+            if self.items.at(i).name == p.name
+                self.items.set(i, p)
+                return
+
+        self.items.push(p)
+    end define
+
+    // Taking one back out, which only a definition that failed to parse ever needs: the name is
+    // entered before the body is read so that the body may call it, and a body that turns out not to
+    // parse must not leave the name behind it.
+    forget(*self, name: string)
+        for i in 0..<self.items.len()
+            if self.items.at(i).name == name
+                self.items.remove(i)
+                return
+    end forget
+end Procs
+
+procs() -> &Procs = Procs(buf())

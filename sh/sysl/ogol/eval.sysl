@@ -1,0 +1,335 @@
+module sh.sysl.ogol
+
+import sysl.buf.{Buf, buf}
+
+// Running the tree.
+//
+// **An interpreter, not an evaluator**: the state is the point. What Ogol exists for is a session at a
+// keyboard, where a procedure defined an hour ago is still there and a variable still holds what the
+// last line put in it -- so the dictionary and the bindings outlive any one line, and `run` is a thing
+// done *to* an interpreter rather than a function of its text.
+
+// A call's own bindings. Only parameters land here: Ogol has no local declaration, so a `set` inside a
+// procedure reaches whatever the name already means, which is the parameter where there is one and the
+// global where there is not.
+struct Frame
+    names: &Buf[string]
+    vals: &Buf[Value]
+
+    find(self, name: string) -> Option[usize]
+        for i in 0..<self.names.len()
+            if self.names.at(i) == name then return Some(i)
+
+        None
+    end find
+end Frame
+
+frame() -> &Frame = Frame(buf(), buf())
+
+// How deep a procedure may call itself. Ogol's recursion is sysl's -- a call runs a call -- so the
+// limit is really the machine's stack, and a number well under it is what turns a program that would
+// have taken the board down into a sentence about the program.
+private const max_calls: int = 128
+
+struct Ogol
+    globals: &Frame
+    frames: &Buf[&Frame]
+    procs: &Procs
+    out: &Buf[string]
+
+    // Whether a line's output is also written to the console as it is produced. A session wants it and
+    // a test does not, and the transcript is kept either way -- which is what lets a test read what a
+    // program printed without a serial port in the middle of it.
+    quiet: bool
+
+    // Set by `stop` and by `output`, and read by every statement list on the way out. It is a field
+    // rather than a value threaded through the walk because every one of the four places that has to
+    // notice it is a loop, and a loop that has to unpack a return value to find out whether to keep
+    // going is the shape this replaces.
+    returning: bool
+    answer: Value
+
+    depth: int
+end Ogol
+
+ogol() -> &Ogol = Ogol(frame(), buf(), procs(), buf(), false, false, Nothing, 0)
+
+// Everything the interpreter has printed since it was made, which is what a test reads instead of a
+// serial line.
+transcript(i: &Ogol) -> string
+    var out = ""
+
+    for k in 0..<i.out.len()
+        if k > 0 then out = out + "\n"
+        out = out + i.out.at(k)
+
+    out
+end transcript
+
+// The frame a name is looked up in first: the innermost call's, where there is one. Ogol has one level
+// of locals rather than Logo's dynamic chain -- a procedure sees its own parameters and the globals,
+// and nothing of whoever called it. That is a departure, and it is the one that makes a procedure
+// readable on its own.
+private innermost(i: &Ogol) -> &Frame =
+    if i.frames.len() == 0 then i.globals else i.frames.at(i.frames.len() - 1)
+
+lookup(i: &Ogol, name: string) -> Option[Value]
+    var f = innermost(i)
+
+    f.find(name) match
+        Some(k) -> return Some(f.vals.at(k))
+        None -> ()
+
+    i.globals.find(name) match
+        Some(k) -> Some(i.globals.vals.at(k))
+        None -> None
+end lookup
+
+// `set` writes where the name already lives, and makes it a global where it lives nowhere. That is
+// Logo's rule, and the reason for it is that a procedure setting a name its caller can see is how a
+// language with no other data structure keeps a running total.
+assign(i: &Ogol, name: string, v: Value)
+    var f = innermost(i)
+
+    f.find(name) match
+        Some(k) ->
+            f.vals.set(k, v)
+            return
+        None -> ()
+
+    i.globals.find(name) match
+        Some(k) -> i.globals.vals.set(k, v)
+        None ->
+            i.globals.names.push(name)
+            i.globals.vals.push(v)
+end assign
+
+// --- Arithmetic ---------------------------------------------------------------------------------
+
+private number(v: Value, op: string, side: string) -> Result[long, Fault]
+    v match
+        Num(n) -> Ok(n)
+        _ -> Err(Bad(s"'$op' works on numbers, and the $side side is ${kind(v)}"))
+end number
+
+private boolean(v: Value, what: string) -> Result[bool, Fault]
+    v match
+        Bool(b) -> Ok(b)
+        _ -> Err(Bad(s"$what needs a true or a false, and got ${kind(v)}"))
+end boolean
+
+// The comparisons that order values, which is a narrower question than equality: `=` answers for any
+// two values because "these are not the same thing" is always true of two different kinds, and there
+// is no answer at all to whether a word comes before a boolean.
+private ordered(op: string, a: Value, b: Value) -> Result[Value, Fault]
+    var x = number(a, op, "left")?
+    var y = number(b, op, "right")?
+
+    op match
+        "<" -> Ok(Bool(x < y))
+        ">" -> Ok(Bool(x > y))
+        "<=" -> Ok(Bool(x <= y))
+        _ -> Ok(Bool(x >= y))
+end ordered
+
+private arithmetic(op: string, a: Value, b: Value) -> Result[Value, Fault]
+    var x = number(a, op, "left")?
+    var y = number(b, op, "right")?
+
+    op match
+        "+" -> Ok(Num(x + y))
+        "-" -> Ok(Num(x - y))
+        "*" -> Ok(Num(x * y))
+        _ ->
+            if y == 0 then return Err(Bad("that divides by zero"))
+
+            Ok(Num(x / y))
+end arithmetic
+
+// --- Evaluation ---------------------------------------------------------------------------------
+
+// A value the caller can use, refusing the absence a command answers with. Nearly every mistake a
+// beginner makes in Logo is this one -- writing a command where an operation was wanted -- so it is
+// worth a sentence that names both halves rather than a complaint about a type.
+private wants_value(v: Value, what: string) -> Result[Value, Fault]
+    v match
+        Nothing -> Err(Bad(s"$what needs a value, and what it was given produces none"))
+        _ -> Ok(v)
+end wants_value
+
+eval(i: &Ogol, e: &Expr) -> Result[Value, Fault]
+    *e match
+        Literal(v) -> Ok(v)
+
+        Negate(inner) ->
+            var v = eval(i, inner)?
+
+            v match
+                Num(n) -> Ok(Num(-n))
+                _ -> Err(Bad(s"'-' negates a number, and that is ${kind(v)}"))
+
+        Binary(op, left, right) ->
+            var a = wants_value(eval(i, left)?, s"'$op'")?
+            var b = wants_value(eval(i, right)?, s"'$op'")?
+
+            op match
+                "=" -> Ok(Bool(same(a, b)))
+                "<>" -> Ok(Bool(!same(a, b)))
+                "<" -> ordered(op, a, b)
+                ">" -> ordered(op, a, b)
+                "<=" -> ordered(op, a, b)
+                ">=" -> ordered(op, a, b)
+                _ -> arithmetic(op, a, b)
+
+        Assign(name, value) ->
+            assign(i, name, wants_value(eval(i, value)?, s"'set $name'")?)
+            Ok(Nothing)
+
+        Define(p) ->
+            i.procs.define(p)
+            Ok(Nothing)
+
+        Block(_) ->
+            Err(Bad("a '[ ]' block is something to run, not a value — 'repeat', 'if' and 'ifelse' " +
+                    "are what take one"))
+
+        Call(name, args) -> call(i, name, args)
+end eval
+
+// Every statement in a list, stopping the moment something says it is leaving. The value is the last
+// statement's, which is what makes a console able to echo a line that ended in an operation.
+run_body(i: &Ogol, body: &Buf[&Expr]) -> Result[Value, Fault]
+    var last: Value = Nothing
+
+    for k in 0..<body.len()
+        if i.returning then break
+
+        last = eval(i, body.at(k))?
+
+    Ok(last)
+end run_body
+
+private block_of(e: &Expr, what: string) -> Result[&Buf[&Expr], Fault]
+    *e match
+        Block(body) -> Ok(body)
+        _ -> Err(Bad(s"$what needs a '[ ]' block"))
+end block_of
+
+private call(i: &Ogol, name: string, args: &Buf[&Expr]) -> Result[Value, Fault]
+    builtin_arity(name) match
+        Some(_) -> return builtin(i, name, args)
+        None -> ()
+
+    // A name with no arguments is a variable before it is anything else, which is the whole of what
+    // dropping Logo's `:` costs: one lookup, in one order, stated here.
+    if args.len() == 0
+        lookup(i, name) match
+            Some(v) -> return Ok(v)
+            None -> ()
+
+    i.procs.find(name) match
+        Some(p) -> apply(i, p, args)
+        None -> Err(Bad(s"I do not know '$name'"))
+end call
+
+private apply(i: &Ogol, p: &Proc, args: &Buf[&Expr]) -> Result[Value, Fault]
+    if i.depth >= max_calls then
+        return Err(Bad(s"'${p.name}' has called itself ${max_calls} deep, which is further than this " +
+                       "can follow"))
+
+    // The parser reads a call at the arity the dictionary held when the line was read, so this can
+    // only disagree if the procedure was redefined in between. It is checked rather than trusted
+    // because the alternative is an index past the end of the parameter list.
+    if args.len() != p.params.len() then
+        return Err(Bad(s"'${p.name}' has been redefined and now takes a different number of things"))
+
+    var f = frame()
+
+    for k in 0..<args.len()
+        f.names.push(p.params.at(k))
+        f.vals.push(wants_value(eval(i, args.at(k))?, s"'${p.name}'")?)
+
+    i.frames.push(f)
+    i.depth += 1
+
+    var done = run_body(i, p.body)
+
+    i.frames.pop()
+    i.depth -= 1
+
+    // The signal is cleared here and nowhere else, because a `stop` leaves *one* procedure. Clearing
+    // it in `run_body` would make it leave the innermost block instead, which is a different language.
+    var answer: Value = Nothing
+
+    if i.returning
+        answer = i.answer
+        i.returning = false
+        i.answer = Nothing
+
+    done?
+
+    Ok(answer)
+end apply
+
+private builtin(i: &Ogol, name: string, args: &Buf[&Expr]) -> Result[Value, Fault]
+    name match
+        "print" ->
+            var v = wants_value(eval(i, args.at(0))?, "'print'")?
+            var line = render(v)
+
+            i.out.push(line)
+            if !i.quiet then print(line)
+
+            Ok(Nothing)
+
+        "stop" ->
+            i.returning = true
+            i.answer = Nothing
+            Ok(Nothing)
+
+        "output" ->
+            i.answer = wants_value(eval(i, args.at(0))?, "'output'")?
+            i.returning = true
+            Ok(Nothing)
+
+        "repeat" ->
+            var n = eval(i, args.at(0))?
+            var count = number(n, "repeat", "left")?
+            var body = block_of(args.at(1), "'repeat'")?
+
+            var k: long = 0
+
+            while k < count && !i.returning
+                run_body(i, body)?
+                k += 1
+
+            Ok(Nothing)
+
+        "if" ->
+            var test = boolean(eval(i, args.at(0))?, "'if'")?
+            var body = block_of(args.at(1), "'if'")?
+
+            if test then run_body(i, body)?
+
+            Ok(Nothing)
+
+        _ ->
+            var test = boolean(eval(i, args.at(0))?, "'ifelse'")?
+            var yes = block_of(args.at(1), "'ifelse'")?
+            var no = block_of(args.at(2), "'ifelse'")?
+
+            run_body(i, if test then yes else no)?
+
+            Ok(Nothing)
+end builtin
+
+// One piece of source, read and run against everything the interpreter already knows. The value is the
+// last statement's, so a console has something to echo and a test has something to assert on.
+run(i: &Ogol, src: string) -> Result[Value, Fault]
+    var body = parse(src, i.procs)?
+
+    i.returning = false
+    i.answer = Nothing
+
+    run_body(i, body)
+end run

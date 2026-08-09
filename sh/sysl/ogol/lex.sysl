@@ -1,0 +1,257 @@
+module sh.sysl.ogol
+
+import sysl.buf.{Buf, buf}
+import sysl.text.{Ascii}
+
+// Text to tokens.
+//
+// The grammar is Logo's and is nearly all decidable from one byte: `"` opens a word, a digit opens a
+// number, and anything else runs to the next delimiter and is a name. Two things are not.
+//
+// **`:` marks a parameter being declared, and nothing else.** Logo writes it on every read as well --
+// `:n` for the value of `n` -- and Ogol does not, because one spelling for a name is easier to type and
+// easier to explain. What the colon is still needed for is the title line: `to double :n output n * 2
+// end` has to be readable in one pass, and with a bare `n` there is nothing to say where the parameter
+// list stops and the body starts. So it survives at the one place it is load bearing, and is refused
+// everywhere else.
+//
+// **A newline is a token.** Logo lets a command run over as many lines as its arguments need, and pays
+// for it with a console that can sit forever waiting for an argument that was never coming. Ogol ends
+// a command at the end of the line, so the token stream has to say where those are -- which is also
+// what makes the continuation prompt honest: the only way to be in the middle of anything at a
+// newline is to have an open bracket or an unfinished definition, and both are visible.
+//
+// **A minus carries the whitespace around it**, because that is what says which minus it is. `pin 15
+// -1` passes two arguments and `pin 15 - 1` passes one, and no amount of looking at the tokens either
+// side can tell them apart afterwards. So the spacing is recorded here, at the only moment it is
+// known, and the parser reads it.
+
+enum Token
+    Number(n: long)
+    Quoted(s: string)
+    Param(s: string)
+    Name(s: string)
+    Operator(s: string)
+    Minus(spaced_before: bool, spaced_after: bool)
+    Open
+    Close
+    OpenBlock
+    CloseBlock
+    LineBreak
+    Eof
+end Token
+
+// A token as it was written, for a diagnostic that has to quote what it found.
+spell(t: Token) -> string
+    t match
+        Number(n) -> str(n)
+        Quoted(s) -> s"\"$s"
+        Param(s) -> s":$s"
+        Name(s) -> s
+        Operator(s) -> s
+        Minus(_, _) -> "-"
+        Open -> "("
+        Close -> ")"
+        OpenBlock -> "["
+        CloseBlock -> "]"
+        LineBreak -> "the end of the line"
+        Eof -> "the end of the input"
+end spell
+
+// What ends a bare run of characters. The four arithmetic signs are in the set, which is what makes
+// `n-1` three tokens rather than one name -- and is the reason a procedure's name may not carry a
+// hyphen.
+private delimits(c: u8) -> bool =
+    c.is_blank() || c == 10 || c == 13 ||
+        c == u8('(') || c == u8(')') || c == u8('[') || c == u8(']') ||
+        c == u8('+') || c == u8('-') || c == u8('*') || c == u8('/') ||
+        c == u8('=') || c == u8('<') || c == u8('>') || c == u8(';')
+
+// A digit run longer than this cannot be relied on to fit the 64-bit integer it is read into, so it is
+// refused rather than wrapped. Nineteen digits sometimes fit and sometimes do not; eighteen always do.
+private const max_digits: int = 18
+
+private struct Lexer
+    text: string
+    src: []const u8
+    at: usize
+
+    done(self) -> bool = self.at >= self.src.len
+
+    bump(*self)
+        self.at += 1
+
+    // Blanks and comments, which are the two things that separate tokens without being one. A newline
+    // is neither -- it is a token here -- so this stops at one.
+    skip_blanks(*self)
+        while !self.done()
+            var c = self.src[self.at]
+
+            if c.is_blank() then
+                self.bump()
+            elif c == u8(';') then
+                while !self.done() && self.src[self.at] != 10 && self.src[self.at] != 13
+                    self.bump()
+            else
+                break
+    end skip_blanks
+
+    // Whether the byte before the cursor leaves an operand behind it. A bracket does not, which is why
+    // it counts as space: `(-1)` and `( -1)` should not be different programs.
+    private spaced_before(self) -> bool
+        if self.at == 0 then return true
+
+        var c = self.src[self.at - 1]
+
+        c.is_blank() || c == 10 || c == 13 || c == u8('(') || c == u8('[')
+    end spaced_before
+
+    private spaced_after(self) -> bool
+        if self.at + 1 >= self.src.len then return true
+
+        var c = self.src[self.at + 1]
+
+        c.is_blank() || c == 10 || c == 13
+    end spaced_after
+
+    private run_to_delimiter(*self) -> string
+        var start = self.at
+
+        while !self.done() && !delimits(self.src[self.at])
+            self.bump()
+
+        self.text[start..<self.at]
+    end run_to_delimiter
+
+    // `12x` is one token and a malformed one, not a number beside a name. The check costs a byte of
+    // lookahead and turns a silent misreading into a sentence.
+    private read_number(*self) -> Result[Token, Fault]
+        var n: long = 0
+        var digits = 0
+
+        while !self.done() && self.src[self.at].is_digit()
+            n = n * 10 + long(int(self.src[self.at]) - 48)
+            digits += 1
+
+            if digits > max_digits then return Err(Bad("that number is too large"))
+
+            self.bump()
+
+        if !self.done() && !delimits(self.src[self.at]) then
+            return Err(Bad(s"'${self.text[self.at..<self.at + 1]}' cannot follow a number"))
+
+        Ok(Number(n))
+    end read_number
+
+    next(*self) -> Result[Token, Fault]
+        self.skip_blanks()
+
+        if self.done() then return Ok(Eof)
+
+        var c = self.src[self.at]
+
+        if c == 13
+            self.bump()
+            if !self.done() && self.src[self.at] == 10 then self.bump()
+            return Ok(LineBreak)
+
+        if c == 10
+            self.bump()
+            return Ok(LineBreak)
+
+        if c == u8('(')
+            self.bump()
+            return Ok(Open)
+
+        if c == u8(')')
+            self.bump()
+            return Ok(Close)
+
+        if c == u8('[')
+            self.bump()
+            return Ok(OpenBlock)
+
+        if c == u8(']')
+            self.bump()
+            return Ok(CloseBlock)
+
+        if c == u8('"')
+            self.bump()
+            return Ok(Quoted(self.run_to_delimiter()))
+
+        if c == u8(':')
+            self.bump()
+
+            var name = self.run_to_delimiter()
+
+            if name == "" then return Err(Bad("':' needs a parameter name after it"))
+
+            return Ok(Param(name))
+
+        if c.is_digit() then return self.read_number()
+
+        // The one token whose meaning is in the space around it, recorded before the cursor moves off
+        // it. `x- y` is the shape with no reading at all -- a binary minus is written with space on
+        // both sides or neither -- so it is refused here rather than parsed into something nobody
+        // meant.
+        if c == u8('-')
+            var before = self.spaced_before()
+            var after = self.spaced_after()
+
+            self.bump()
+
+            if !before && after then
+                return Err(Bad("'-' is written '- ' with a space each side to subtract, or '-' with none"))
+
+            return Ok(Minus(before, after))
+
+        if c == u8('+') || c == u8('*') || c == u8('/') || c == u8('=')
+            self.bump()
+            return Ok(Operator(self.text[self.at - 1..<self.at]))
+
+        if c == u8('<')
+            self.bump()
+
+            if !self.done() && self.src[self.at] == u8('=')
+                self.bump()
+                return Ok(Operator("<="))
+
+            if !self.done() && self.src[self.at] == u8('>')
+                self.bump()
+                return Ok(Operator("<>"))
+
+            return Ok(Operator("<"))
+
+        if c == u8('>')
+            self.bump()
+
+            if !self.done() && self.src[self.at] == u8('=')
+                self.bump()
+                return Ok(Operator(">="))
+
+            return Ok(Operator(">"))
+
+        Ok(Name(self.run_to_delimiter()))
+    end next
+end Lexer
+
+// Every token in a source text, ending with exactly one `Eof`.
+//
+// The whole text is tokenized before anything is parsed, because the parser has to look ahead a token
+// to decide what a minus is and how far an argument reaches, and a stream that could fail on the
+// lookahead would put a lexical error in the middle of a syntactic decision.
+tokens(text: string) -> Result[&Buf[Token], Fault]
+    var lx = Lexer(text, text.bytes, 0)
+    var out: &Buf[Token] = buf()
+
+    while true
+        var t = lx.next()?
+
+        out.push(t)
+
+        t match
+            Eof -> break
+            _ -> ()
+
+    Ok(out)
+end tokens

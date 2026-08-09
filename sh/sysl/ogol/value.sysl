@@ -1,0 +1,64 @@
+module sh.sysl.ogol
+
+// What an Ogol expression can produce, and how it is written back.
+//
+// **Three kinds and a fourth that is an absence.** Logo has one datum -- the word -- and gets numbers
+// and booleans by reading a word when it needs one, so `"5` and `5` are the same thing there and
+// `"true` is what `if` tests. Ogol separates them, because the reason it exists is to write to a
+// register: a value that knows whether it is a number decides at the point of the mistake rather than
+// at the point of the write, and `12` meaning twelve everywhere is worth more here than a uniform
+// datum is.
+//
+// `Nothing` is what a command answers with. Logo draws the same line and calls the two sides commands
+// and operations; keeping the absence *in* the value type rather than beside it is what lets one
+// evaluator return both, and what lets `print print 1` be refused with a sentence about `print`
+// rather than about a missing argument.
+enum Value
+    Nothing
+    Num(n: long)
+    Word(s: string)
+    Bool(b: bool)
+end Value
+
+// A value as a person would type it back in. It is the whole of Ogol's output -- `print` renders, the
+// REPL renders what a line came to, and a diagnostic renders whatever it is complaining about -- so a
+// value that rendered ambiguously would be a hole in all three at once.
+render(v: Value) -> string
+    v match
+        Nothing -> ""
+        Num(n) -> str(n)
+        Word(s) -> s
+        Bool(b) -> if b then "true" else "false"
+end render
+
+// The name of a value's kind, for a diagnostic that has to say what it got. Written as the noun a
+// sentence wants -- "a number", not "Num" -- because every use of it is inside prose.
+kind(v: Value) -> string
+    v match
+        Nothing -> "nothing"
+        Num(_) -> "a number"
+        Word(_) -> "a word"
+        Bool(_) -> "a boolean"
+end kind
+
+// Equality over the whole of `Value`, which the language needs for `=` and `<>`.
+//
+// **Values of different kinds are unequal rather than an error.** `1 = "1` is a fair question with a
+// plain answer, and refusing it would mean a program could not compare two things it had not already
+// proved were the same kind. Ordering is the other way about -- see `sh.sysl.ogol.compare` -- because
+// there is no answer to whether a word is less than a boolean.
+same(a: Value, b: Value) -> bool
+    a match
+        Nothing -> b match
+            Nothing -> true
+            _ -> false
+        Num(x) -> b match
+            Num(y) -> x == y
+            _ -> false
+        Word(x) -> b match
+            Word(y) -> x == y
+            _ -> false
+        Bool(x) -> b match
+            Bool(y) -> x == y
+            _ -> false
+end same

@@ -1,0 +1,28 @@
+// Ogol -- Onboard General Operations Language, pronounced OH-gol.
+//
+// A small interactive language in the shape of Logo, written in sysl so that it can be linked into a
+// program on a microcontroller and driven over a serial line. This package is the language itself and
+// nothing else: it reads text and answers with text, and knows nothing about a board, a register or a
+// terminal. What drives it is a separate program.
+//
+// This is the block a *consumer* writes to reach it:
+//
+//     dependencies {
+//       ogol { git = "github.com/sysl-lang/ogol", version = "0.1.0" }
+//     }
+//
+// The coordinate names the package, `ogol`; the module a program imports is `sh.sysl.ogol`.
+
+package {
+  name    = "ogol"
+  version = "0.1.0"
+}
+
+// **`alloc = true`, and it is a decision rather than an oversight.** An interpreter grows a token
+// list, a syntax tree and a dictionary while it reads, and the sizes of all three are the user's to
+// choose at the keyboard. The board this is aimed at links newlib's heap whether or not a program
+// touches it, so the capability costs nothing that is not already spent -- and asking for it is what
+// lets a name be a `string` and a body be a `Buf`, rather than an offset into a fixed arena.
+requires {
+  alloc = true
+}

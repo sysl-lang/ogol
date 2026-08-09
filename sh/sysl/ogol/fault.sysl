@@ -1,0 +1,22 @@
+module sh.sysl.ogol
+
+// What goes wrong, and the one distinction a console cares about.
+//
+// **`More` is not an error.** It is the answer when the text stops in the middle of something that
+// could still be finished -- an unclosed `[`, a `to` with no `end` under it. A file being read has run
+// out and that is a mistake; a person typing has simply not finished, and the caller is the only one
+// that knows which it is. Keeping the two apart here is what lets a REPL print a continuation prompt
+// instead of a complaint, and it is the whole reason this is an enum rather than a string.
+enum Fault
+    Bad(message: string)
+    More
+end Fault
+
+// A fault as the sentence a person reads. `More` renders as a complaint because a caller that has run
+// out of text and cannot ask for more is entitled to one -- a REPL never gets here, because it takes
+// the other branch and asks.
+describe(f: Fault) -> string
+    f match
+        Bad(message) -> message
+        More -> "the line stops in the middle of something"
+end describe
