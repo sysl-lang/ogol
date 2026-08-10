@@ -27,6 +27,28 @@ builtin_arity(name: string) -> Option[usize]
         "ifelse" -> Some(3)
         "stop" -> Some(0)
         "output" -> Some(1)
+        // The list surface. **Every one of these works on a word as well as on a list**, which is
+        // Logo's rule and not a convenience: a word is a sequence of characters exactly as a list is a
+        // sequence of elements, so `first "hello` is `h` and `butfirst [a b c]` is `[b c]`. Writing
+        // two families for the two would double the vocabulary to say one thing.
+        "first" -> Some(1)
+        "last" -> Some(1)
+        "butfirst" -> Some(1)
+        "bf" -> Some(1)
+        "butlast" -> Some(1)
+        "bl" -> Some(1)
+        // **`count` is deliberately absent, and it is Logo's name for this.** Dropping Logo's sigils
+        // means a built-in name cannot also be a variable, and `count` is one of the most natural
+        // variable names there is — the README's own first example is `set count 0`. Adding it would
+        // make that example an error, which is too high a price for one operation. `emptyp` answers
+        // the question people actually ask of a list, and how to spell the length is a decision worth
+        // taking deliberately rather than by seizing the obvious word.
+        "item" -> Some(2)
+        "fput" -> Some(2)
+        "lput" -> Some(2)
+        "list" -> Some(2)
+        "emptyp" -> Some(1)
+        "listp" -> Some(1)
         _ -> None
 end builtin_arity
 
@@ -316,7 +338,7 @@ private struct Parser
                         Ok(inner)
                     Eof -> Err(More)
                     _ -> Err(Bad(s"')' expected, not ${spell(self.peek())}"))
-            OpenBlock -> self.block(depth)
+            OpenBlock -> self.bracket(depth)
             Name("to") -> Err(Bad("'to' starts a definition and cannot be part of an expression"))
             Name("end") -> Err(Bad("'end' closes a definition, and there is none open"))
             Name("set") -> self.assignment(depth)
@@ -365,29 +387,93 @@ private struct Parser
         Ok(Call(name, args))
     end call
 
-    private block(*self, depth: int) -> Result[&Expr, Fault]
+    // `[ … ]`, which is **two things at once and has to be read as both**.
+    //
+    // Logo has one aggregate and one bracket: `[a b c]` is a list of unevaluated words, and `repeat 3
+    // [ print 1 ]` is the same list handed to something that runs it. Ogol read only the second of
+    // those, so `print [sdfg dfgh]` was refused -- a block was "something to run, not a value".
+    //
+    // **So the run is read twice, and both readings are kept.** The datum reading always succeeds, and
+    // is what `print` and every list operation see. The statement reading is attempted over the same
+    // tokens and is what `repeat`, `if` and `ifelse` demand; when it fails, the failure is carried
+    // rather than raised, so `[+]` is a list until somebody tries to run it and then reports the
+    // error the parser already had.
+    //
+    // Reading twice rather than converting one to the other is what keeps both honest: a datum built
+    // from statements could not hold `[a b c]`, whose words are calls to nothing, and statements
+    // rebuilt from a datum would have to re-lex text this parser already has as tokens.
+    private bracket(*self, depth: int) -> Result[&Expr, Fault]
         self.bump()
 
-        var out: &Buf[&Expr] = buf()
+        val start = self.at
+        val items = self.datum(depth)?
+        val after = self.at
 
-        while true
+        // The same tokens again, as code. A `More` cannot arise here -- the datum reading above only
+        // returns once it has seen the closing bracket -- so anything this refuses is a real fault,
+        // and it is held rather than thrown.
+        self.at = start
+
+        var body: &Buf[&Expr] = buf()
+        var why = ""
+
+        while why == ""
             self.skip_breaks()
 
+            self.peek() match
+                Eof -> why = "the block does not end"
+                CloseBlock -> break
+                Close -> why = "')' cannot close a '['"
+                _ ->
+                    self.statement(false, depth + 1) match
+                        Err(f) -> why = describe(f)
+                        Ok(stmt) ->
+                            self.surplus(stmt) match
+                                Err(f) -> why = describe(f)
+                                Ok(_) -> body.push(stmt)
+
+        self.at = after
+
+        Ok(Bracket(items, body, why))
+    end bracket
+
+    // The bracketed run as **data**: every token as the word it was written, and a nested `[ ]` as a
+    // list element of its own.
+    //
+    // **An operator is a word here**, which is what lets a list hold the text of a program: `[set n n
+    // + 1]` is six elements, one of them `+`. Logo has always read them this way, and it is the same
+    // reason a list can be `run`.
+    //
+    // A line break inside a bracket is not an element -- a list may be written across as many lines as
+    // it likes, which is one of the two things Ogol lets span a line.
+    private datum(*self, depth: int) -> Result[&Buf[Value], Fault]
+        if depth > max_depth then return Err(Bad("these brackets are nested too deeply"))
+
+        var out: &Buf[Value] = buf()
+
+        loop
             self.peek() match
                 Eof -> return Err(More)
                 CloseBlock ->
                     self.bump()
-                    break
+                    return Ok(out)
                 Close -> return Err(Bad("')' cannot close a '['"))
-                _ -> ()
+                LineBreak -> self.bump()
+                OpenBlock ->
+                    self.bump()
 
-            var stmt = self.statement(false, depth + 1)?
+                    val inner = self.datum(depth + 1)?
 
-            out.push(stmt)
-            self.surplus(stmt)?
+                    out.push(List(inner))
+                Number(n) ->
+                    self.bump()
+                    out.push(Num(n))
+                _ ->
+                    val t = self.peek()
 
-        Ok(Block(out))
-    end block
+                    self.bump()
+                    out.push(Word(spell(t)))
+    end datum
 end Parser
 
 // The name a statement is headed by, or the empty string where it is not headed by one. It is what a

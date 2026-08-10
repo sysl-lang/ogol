@@ -24,9 +24,55 @@ ogol> print double count
 ## What it is, in one paragraph
 
 Logo's grammar with the brackets left off: every name has a known number of arguments, so
-`print double count` reads without a comma or a parenthesis anywhere. There are seven built-in names
-— `print`, `set`, `repeat`, `if`, `ifelse`, `stop`, `output` — the five arithmetic and six comparison
-operators, and `to … end` for everything else. Values are numbers, words and booleans.
+`print double count` reads without a comma or a parenthesis anywhere. Seven names do the work —
+`print`, `set`, `repeat`, `if`, `ifelse`, `stop`, `output` — with eleven more for lists, the five
+arithmetic and six comparison operators, and `to … end` for everything else. Values are numbers,
+words, booleans and lists.
+
+## Lists
+
+`[a b c]` is a list, and its elements are **not evaluated** — which is what lets a list hold words
+that name nothing, and what lets `repeat 3 [ print 1 ]` hand three unevaluated words to something
+that decides what they mean. A block is not a separate kind of thing: it is a list that `repeat`,
+`if` or `ifelse` ran.
+
+```
+ogol> print [hello there]
+hello there
+ogol> print [a [b c] d]
+a [b c] d
+ogol> set xs [1 2 3]
+ogol> print first xs
+1
+ogol> print butfirst xs
+2 3
+ogol> print fput 0 xs
+0 1 2 3
+```
+
+A list prints without its own brackets and a nested one keeps them: `print` is asking for the
+contents, and inside a list the brackets are the only thing saying where an element ends.
+
+| | |
+|---|---|
+| `first` `last` | one end or the other |
+| `butfirst` `bf` `butlast` `bl` | everything but that end — this is how a list is walked |
+| `item n` | the nth, **counting from 1** |
+| `fput` `lput` | a new list with one more on the front or the back |
+| `list a b` | the two of them as a list |
+| `emptyp` `listp` | whether it is empty, and whether it is a list at all |
+
+**Every one of these reads a word as well as a list**, because a word is a sequence of characters
+exactly as a list is a sequence of elements: `first "hello` is `h` and `butfirst "hello` is `ello`.
+That is Logo's rule and it halves the vocabulary without costing any clarity.
+
+A number is not a sequence here. Logo would read `first 123` as `1` by treating the number as its own
+text; Ogol keeps numbers and words apart on purpose, so that is a mistake and says so.
+
+**There is no `count`, and its absence is deliberate.** Logo's name for a list's length collides with
+one of the most natural variable names there is — the first example in this file is `set count 0` —
+and dropping Logo's sigils means a built-in name cannot also be a variable. `emptyp` answers the
+question people actually ask of a list; how to spell the length is a decision still to be taken.
 
 ## What is different from Logo, and why
 

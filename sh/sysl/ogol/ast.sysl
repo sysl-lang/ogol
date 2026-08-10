@@ -21,7 +21,18 @@ import sysl.buf.{Buf, buf}
 // syntax distinguishes them.
 enum Expr
     Literal(v: Value)
-    Block(body: &Buf[&Expr])
+    // `[ … ]`, held as **both** of the things it can be.
+    //
+    // `items` is the datum reading, which always succeeds and is what the bracket evaluates to: a
+    // list, whose elements are unevaluated. `body` is the same tokens read as statements, which is
+    // what `repeat`, `if` and `ifelse` run. `why` is empty when that reading worked and carries the
+    // parser's own sentence when it did not.
+    //
+    // **Carrying the failure rather than raising it is what lets `[a + b]` be a list.** As data those
+    // are three perfectly good words; as code they are nothing at all. Refusing at read time would
+    // make the list unwritable, and refusing nowhere would make `repeat 3 [+]` complain about the
+    // wrong thing — so the complaint is kept where it was found and delivered where it matters.
+    Bracket(items: &Buf[Value], body: &Buf[&Expr], why: string)
     Call(name: string, args: &Buf[&Expr])
     Assign(name: string, value: &Expr)
     Binary(op: string, left: &Expr, right: &Expr)

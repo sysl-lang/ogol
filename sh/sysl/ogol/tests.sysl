@@ -195,11 +195,99 @@ ifelse_chooses_between_two_blocks() =
 a_test_that_is_not_a_boolean_says_so() =
     assert_eq(printed("if 1 [ print 1 ]"), "error: 'if' needs a true or a false, and got a number")
 
+// -- lists ----------------------------------------------------------------------------------------
+//
+// **A bracket is a list, and a block is a list that something ran.** That is Logo's design and it used
+// to be the other way round here: `[ ]` was code and only code, so `print [hello there]` was refused
+// and the language had no way to hold two things at once.
+
+// The words are not evaluated, which is the whole point: neither of these names anything.
 @test
-a_block_is_not_a_value() =
-    assert_eq(printed("print [ print 1 ]"),
-              "error: a '[ ]' block is something to run, not a value — 'repeat', 'if' and 'ifelse' " +
-              "are what take one")
+a_bracket_is_a_list_of_unevaluated_words() =
+    assert_eq(printed("print [hello there]"), "hello there")
+
+// The same bracket that `print` reads as data, `repeat` reads as statements. One syntax, both jobs.
+@test
+a_bracket_is_still_a_block_where_one_is_wanted() =
+    assert_eq(printed("repeat 2 [ print 1 ]"), "1\n1")
+
+// A list renders without its own brackets and a nested one with them: `print` is asking for the
+// contents, and a nested list needs the brackets to say where it ends.
+@test
+a_nested_list_keeps_its_brackets() =
+    assert_eq(printed("print [a [b c] d]"), "a [b c] d")
+
+@test
+an_empty_list_prints_as_nothing() =
+    assert_eq(printed("print []"), "")
+
+// Numbers stay numbers inside a list; everything else is the word it was written.
+@test
+a_list_holds_numbers_as_numbers() =
+    assert_eq(printed("print first [1 2 3]"), "1")
+
+@test
+first_and_last_of_a_list() =
+    assert_eq(printed("print last [a b c]"), "c")
+
+@test
+butfirst_drops_the_head() =
+    assert_eq(printed("print butfirst [a b c]"), "b c")
+
+@test
+butlast_drops_the_tail() =
+    assert_eq(printed("print bl [a b c]"), "a b")
+
+// A word is a sequence too, which is Logo's rule and halves the vocabulary.
+@test
+the_same_operations_read_a_word() =
+    assert_eq(printed("print first \"hello"), "h")
+
+@test
+butfirst_of_a_word_is_the_rest_of_it() =
+    assert_eq(printed("print butfirst \"hello"), "ello")
+
+@test
+item_counts_from_one() =
+    assert_eq(printed("print item 2 [a b c]"), "b")
+
+@test
+item_from_zero_says_where_counting_starts() =
+    assert_eq(printed("print item 0 [a b c]"), "error: 'item' counts from 1, and was asked for 0")
+
+@test
+fput_and_lput_answer_new_lists() =
+    assert_eq(printed("print fput 1 [2 3]"), "1 2 3")
+
+@test
+lput_puts_on_the_back() =
+    assert_eq(printed("print lput 3 [1 2]"), "1 2 3")
+
+@test
+list_makes_one_of_two_values() =
+    assert_eq(printed("print list 1 2"), "1 2")
+
+@test
+emptyp_answers_for_a_list_and_a_word() =
+    assert_eq(printed("print emptyp []"), "true")
+
+@test
+listp_tells_a_list_from_a_word() =
+    assert_eq(printed("print listp [a]"), "true")
+
+@test
+two_lists_are_equal_element_by_element() =
+    assert_eq(printed("print [1 2] = [1 2]"), "true")
+
+// Held as data a bracket is fine; run as code it is not, and the parser's own sentence is what comes
+// back rather than a fresh one about runnability.
+@test
+a_bracket_that_is_not_code_is_still_a_list() =
+    assert_eq(printed("print [+]"), "+")
+
+@test
+first_of_an_empty_list_says_so() =
+    assert_eq(printed("print first []"), "error: 'first' of an empty list")
 
 // --- Procedures ---------------------------------------------------------------------------------
 

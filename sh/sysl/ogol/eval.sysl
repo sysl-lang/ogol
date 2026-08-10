@@ -1,6 +1,7 @@
 module sh.sysl.ogol
 
 import sysl.buf.{Buf, buf}
+import sysl.text.str_builder
 
 // Running the tree.
 //
@@ -189,9 +190,10 @@ eval(i: &Ogol, e: &Expr) -> Result[Value, Fault]
             i.procs.define(p)
             Ok(Nothing)
 
-        Block(_) ->
-            Err(Bad("a '[ ]' block is something to run, not a value — 'repeat', 'if' and 'ifelse' " +
-                    "are what take one"))
+        // **A bracket is a list**, and that is the whole of Logo's one aggregate. It used to be
+        // refused here — "something to run, not a value" — which made `print [hello there]`
+        // unwritable and left the language with no way to hold more than one thing at a time.
+        Bracket(items, _, _) -> Ok(List(items))
 
         Call(name, args) -> call(i, name, args)
 end eval
@@ -209,9 +211,129 @@ run_body(i: &Ogol, body: &Buf[&Expr]) -> Result[Value, Fault]
     Ok(last)
 end run_body
 
+// ## The sequence operations, over a list or a word alike
+//
+// **A word's elements are its characters**, so every one of these has two arms and they mean the same
+// thing. Ogol holds a word as text rather than as a list of one-character words, so the two arms are
+// written out rather than one being defined in terms of the other — which would cost a list of
+// characters on every call, on a board, to save six lines here.
+
+// The single argument almost all of these take, evaluated and insisted on being a value.
+private one(i: &Ogol, args: &Buf[&Expr]) -> Result[Value, Fault]
+    wants_value(eval(i, args.at(0))?, "this")
+
+// The character at `k` of a word, as a word of its own.
+private char_word(s: string, k: usize) -> Value
+    var out = str_builder()
+    var n: usize = 0
+
+    for c in s.chars
+        if n == k then out.push_char(c)
+        n += 1
+
+    Word(out.finish())
+end char_word
+
+private first_of(v: Value) -> Result[Value, Fault]
+    v match
+        List(items) ->
+            if items.is_empty() then return Err(Bad("'first' of an empty list"))
+
+            Ok(items.at(0))
+        Word(s) ->
+            if s == "" then return Err(Bad("'first' of an empty word"))
+
+            Ok(char_word(s, 0))
+        _ -> Err(Bad(s"'first' needs a list or a word, not ${kind(v)}"))
+end first_of
+
+private last_of(v: Value) -> Result[Value, Fault]
+    v match
+        List(items) ->
+            if items.is_empty() then return Err(Bad("'last' of an empty list"))
+
+            Ok(items.at(items.len() - 1))
+        Word(s) ->
+            if s == "" then return Err(Bad("'last' of an empty word"))
+
+            Ok(char_word(s, s.chars.count() - 1))
+        _ -> Err(Bad(s"'last' needs a list or a word, not ${kind(v)}"))
+end last_of
+
+// **Everything but the first**, which is the half of Logo's pair that walks a sequence. `butfirst` of
+// a one-element sequence is the empty one rather than an error: that is what ends a loop.
+private but_first_of(v: Value) -> Result[Value, Fault]
+    v match
+        List(items) ->
+            if items.is_empty() then return Err(Bad("'butfirst' of an empty list"))
+
+            var out: &Buf[Value] = buf()
+
+            for k in 1..<items.len() do out.push(items.at(k))
+            Ok(List(out))
+        Word(s) ->
+            if s == "" then return Err(Bad("'butfirst' of an empty word"))
+
+            Ok(Word(drop_chars(s, 1, s.chars.count())))
+        _ -> Err(Bad(s"'butfirst' needs a list or a word, not ${kind(v)}"))
+end but_first_of
+
+private but_last_of(v: Value) -> Result[Value, Fault]
+    v match
+        List(items) ->
+            if items.is_empty() then return Err(Bad("'butlast' of an empty list"))
+
+            var out: &Buf[Value] = buf()
+
+            for k in 0..<items.len() - 1 do out.push(items.at(k))
+            Ok(List(out))
+        Word(s) ->
+            if s == "" then return Err(Bad("'butlast' of an empty word"))
+
+            Ok(Word(drop_chars(s, 0, s.chars.count() - 1)))
+        _ -> Err(Bad(s"'butlast' needs a list or a word, not ${kind(v)}"))
+end but_last_of
+
+// The characters of `s` from `from` up to `until`, gathered back into a word. Counted in characters
+// rather than bytes, so a word with an accent in it does not lose half of one.
+private drop_chars(s: string, from: usize, until: usize) -> string
+    var out = str_builder()
+    var n: usize = 0
+
+    for c in s.chars
+        if n >= from && n < until then out.push_char(c)
+        n += 1
+
+    out.finish()
+end drop_chars
+
+private item_of(n: long, v: Value) -> Result[Value, Fault]
+    if n < 1 then return Err(Bad(s"'item' counts from 1, and was asked for $n"))
+
+    val k = usize(n - 1)
+
+    v match
+        List(items) ->
+            if k >= items.len() then
+                return Err(Bad(s"'item' was asked for $n of a list of ${items.len()}"))
+
+            Ok(items.at(k))
+        Word(s) ->
+            if k >= s.chars.count() then
+                return Err(Bad(s"'item' was asked for $n of a word of ${s.chars.count()}"))
+
+            Ok(char_word(s, k))
+        _ -> Err(Bad(s"'item' needs a list or a word, not ${kind(v)}"))
+end item_of
+
+// What `repeat`, `if` and `ifelse` demand: a bracket that read as statements.
+//
+// **The parser's own sentence is what comes back when it did not**, rather than a fresh one from
+// here. `repeat 3 [+]` is a bracket the datum reading accepted and the statement reading refused, and
+// the refusal is worth more than "this is not runnable" — it says what was wrong with the `+`.
 private block_of(e: &Expr, what: string) -> Result[&Buf[&Expr], Fault]
     *e match
-        Block(body) -> Ok(body)
+        Bracket(_, body, why) -> if why == "" then Ok(body) else Err(Bad(why))
         _ -> Err(Bad(s"$what needs a '[ ]' block"))
 end block_of
 
@@ -286,6 +408,88 @@ private builtin(i: &Ogol, name: string, args: &Buf[&Expr]) -> Result[Value, Faul
             i.returning = true
             i.answer = Nothing
             Ok(Nothing)
+
+        // ## The list surface
+        //
+        // **A word is a sequence too**, so each of these answers for both: `first "hello` is `h` and
+        // `first [a b c]` is `a`. That is Logo's rule, and it halves the vocabulary without costing
+        // any clarity — the operation is "the first of a sequence", and a word is one.
+        //
+        // A number is *not* a sequence here. Logo would read `first 123` as `1` by treating the number
+        // as its own text; Ogol keeps numbers and words apart on purpose (see `Value`), so asking for
+        // the first of a number is a mistake and says so.
+
+        "first" -> first_of(one(i, args)?)
+        "last" -> last_of(one(i, args)?)
+        "butfirst" -> but_first_of(one(i, args)?)
+        "bf" -> but_first_of(one(i, args)?)
+        "butlast" -> but_last_of(one(i, args)?)
+        "bl" -> but_last_of(one(i, args)?)
+
+        // **One-based**, which is Logo's and is the right answer for a language people meet before
+        // they meet any other. `item 0` says so rather than reading as the last element or as an
+        // empty answer.
+        "item" ->
+            val n = number(eval(i, args.at(0))?, "item", "left")?
+            val v = wants_value(eval(i, args.at(1))?, "'item'")?
+
+            item_of(n, v)
+
+        // `fput` puts one element on the front and `lput` on the back. Both answer a **new** list:
+        // nothing in Ogol mutates a value, so a name still holds what it held.
+        "fput" ->
+            val head = wants_value(eval(i, args.at(0))?, "'fput'")?
+            val rest = wants_value(eval(i, args.at(1))?, "'fput'")?
+
+            rest match
+                List(items) ->
+                    var out: &Buf[Value] = buf()
+
+                    out.push(head)
+                    for k in 0..<items.len() do out.push(items.at(k))
+                    Ok(List(out))
+                _ -> Err(Bad(s"'fput' needs a list to put onto, not ${kind(rest)}"))
+
+        "lput" ->
+            val tail = wants_value(eval(i, args.at(0))?, "'lput'")?
+            val rest = wants_value(eval(i, args.at(1))?, "'lput'")?
+
+            rest match
+                List(items) ->
+                    var out: &Buf[Value] = buf()
+
+                    for k in 0..<items.len() do out.push(items.at(k))
+                    out.push(tail)
+                    Ok(List(out))
+                _ -> Err(Bad(s"'lput' needs a list to put onto, not ${kind(rest)}"))
+
+        // Two values as a list of two. Logo's `list` takes exactly two for the same reason everything
+        // else here does: arity is what lets the grammar go without brackets, so a variadic name
+        // could not be read.
+        "list" ->
+            val a = wants_value(eval(i, args.at(0))?, "'list'")?
+            val b = wants_value(eval(i, args.at(1))?, "'list'")?
+
+            var out: &Buf[Value] = buf()
+
+            out.push(a)
+            out.push(b)
+            Ok(List(out))
+
+        "emptyp" ->
+            val v = one(i, args)?
+
+            v match
+                List(items) -> Ok(Bool(items.is_empty()))
+                Word(s) -> Ok(Bool(s == ""))
+                _ -> Err(Bad(s"'emptyp' needs a list or a word, not ${kind(v)}"))
+
+        "listp" ->
+            val v = one(i, args)?
+
+            v match
+                List(_) -> Ok(Bool(true))
+                _ -> Ok(Bool(false))
 
         "output" ->
             i.answer = wants_value(eval(i, args.at(0))?, "'output'")?

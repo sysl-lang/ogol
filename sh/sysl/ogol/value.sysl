@@ -1,8 +1,10 @@
 module sh.sysl.ogol
 
+import sysl.buf.{Buf, buf}
+
 // What an Ogol expression can produce, and how it is written back.
 //
-// **Three kinds and a fourth that is an absence.** Logo has one datum -- the word -- and gets numbers
+// **Four kinds and a fifth that is an absence.** Logo has one datum -- the word -- and gets numbers
 // and booleans by reading a word when it needs one, so `"5` and `5` are the same thing there and
 // `"true` is what `if` tests. Ogol separates them, because the reason it exists is to write to a
 // register: a value that knows whether it is a number decides at the point of the mistake rather than
@@ -18,6 +20,17 @@ enum Value
     Num(n: long)
     Word(s: string)
     Bool(b: bool)
+    // A list, which is Logo's one aggregate and is written `[a b c]`.
+    //
+    // **Its elements are not evaluated**, and that is the whole of what makes a list useful rather
+    // than merely another container: `print [hello there]` prints two words that name nothing, and
+    // `repeat 3 [ print 1 ]` hands three unevaluated words to something that decides what they mean.
+    // A language that evaluated them could write neither.
+    //
+    // A nested list is an element like any other, so `[a [b c] d]` has three of them and the middle
+    // one is a list. That is what makes a list a tree rather than a row, and it is what `first` of a
+    // list of lists answers.
+    List(items: &Buf[Value])
 end Value
 
 // A value as a person would type it back in. It is the whole of Ogol's output -- `print` renders, the
@@ -29,7 +42,39 @@ render(v: Value) -> string
         Num(n) -> str(n)
         Word(s) -> s
         Bool(b) -> if b then "true" else "false"
+        // **A list renders without its own brackets and a nested one with them**, which is Logo's
+        // rule and looks arbitrary until you print one: `print [a b c]` is asking for the *contents*,
+        // and answering `[a b c]` would make `print` the only thing in the language that quotes what
+        // it was given. A list inside a list is a different question -- there the brackets are the
+        // only thing saying where one element ends -- so they stay.
+        List(_) -> render_items(v)
 end render
+
+// The elements of a list, space separated, with any nested list bracketed.
+//
+// Split out because `render` and this one disagree at exactly one point -- the outermost brackets --
+// and writing that as a flag on one function would put the disagreement inside a condition rather
+// than in two names.
+private render_items(v: Value) -> string
+    v match
+        List(items) ->
+            var out = ""
+
+            for k in 0..<items.len()
+                if k > 0 then out = out + " "
+
+                out = out + bracketed(items.at(k))
+
+            out
+        _ -> render(v)
+end render_items
+
+// One element as it appears *inside* a list.
+private bracketed(v: Value) -> string
+    v match
+        List(_) -> "[" + render_items(v) + "]"
+        _ -> render(v)
+end bracketed
 
 // The name of a value's kind, for a diagnostic that has to say what it got. Written as the noun a
 // sentence wants -- "a number", not "Num" -- because every use of it is inside prose.
@@ -39,6 +84,7 @@ kind(v: Value) -> string
         Num(_) -> "a number"
         Word(_) -> "a word"
         Bool(_) -> "a boolean"
+        List(_) -> "a list"
 end kind
 
 // Equality over the whole of `Value`, which the language needs for `=` and `<>`.
@@ -60,5 +106,18 @@ same(a: Value, b: Value) -> bool
             _ -> false
         Bool(x) -> b match
             Bool(y) -> x == y
+            _ -> false
+        // **Element by element, and a nested list recurses**, which is the answer a person means by
+        // `=` on two lists. Comparing them by identity would make `[1 2] = [1 2]` false, which is a
+        // question nobody asks twice; comparing rendered text would make `[1 2]` equal the word
+        // `"1 2"`, which is worse than either.
+        List(xs) -> b match
+            List(ys) ->
+                if xs.len() != ys.len() then return false
+
+                for k in 0..<xs.len()
+                    if !same(xs.at(k), ys.at(k)) then return false
+
+                true
             _ -> false
 end same
