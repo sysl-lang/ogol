@@ -1,0 +1,59 @@
+module sh.sysl.ogol
+
+// The read-run-print loop, which is the same on every machine Ogol runs on.
+//
+// **It lives in the language rather than in each console, because there is more than one console and
+// there will be more.** There are two today — a desktop terminal and a Pico 2 W over a serial cable —
+// and an STM32 is coming, and the Pico's other core is a different target for the same board. Written
+// out per platform, this loop would be four copies of twenty lines that drift: the one someone uses
+// daily grows a fix, the others do not, and the difference then reads as a *board* bug rather than as
+// a console that was never updated.
+//
+// **`*Iterate[string]` is what makes one loop serve all of them.** A `sysl.term.edit.Editor` and a
+// `sysl.io.Lines` are both one, so the platform decides which to build and nothing below that line
+// knows the difference. What is left for a console to do is name its streams and print its own
+// banner — a dozen lines, none of it about Ogol.
+//
+// **The interpreter is a parameter rather than made here**, and that is what makes this testable: a
+// test hands it a cursor over a byte script and reads `transcript` afterwards. A `session` that made
+// its own interpreter would leave a test nothing to look at, which is how a loop like this ends up
+// being the one part of a language that nothing checks.
+
+// Every line the cursor yields, run, with what it came to printed.
+//
+// Returns when the cursor ends or when `bye` is typed on a line of its own. **What to do about that is
+// the caller's**, and the two answers differ: a hosted program returns from `main`, while a board has
+// nowhere to exit *to* and says so rather than falling off the end.
+//
+// The **continuation prompt** is the reason `Fault` has two sides. A line that stops inside a `[` or
+// before an `end` has not gone wrong — it is held, `....` is printed, and the next line is added to
+// it. Anything else is a refusal, printed and dropped.
+session(i: &Ogol, cursor: *Iterate[string])
+    // What has been typed and not yet run, because it was not finished. Empty is the ordinary state.
+    var pending = ""
+
+    prints("ogol> ")
+
+    for line in cursor
+        if pending == "" && line == "bye" then break
+
+        var src = if pending == "" then line else pending + "\n" + line
+
+        pending = ""
+
+        run(i, src) match
+            // A command answers with nothing, and a console that echoed a blank line for every
+            // `print` would double every program's output.
+            Ok(v) ->
+                v match
+                    Nothing -> ()
+                    _ -> print(render(v))
+            Err(f) ->
+                f match
+                    More -> pending = src
+                    Bad(message) -> print(message)
+
+        prints(if pending == "" then "ogol> " else ".... ")
+
+    print("")
+end session

@@ -2,6 +2,7 @@ module sh.sysl.ogol
 @tests
 
 import sysl.buf.{Buf, buf}
+import sysl.io.{bytes_reader, console_lines}
 
 // The language's own tests, run on the host by `sysl test .`.
 //
@@ -384,3 +385,55 @@ a_procedure_defined_on_one_line_is_there_on_the_next() =
     run(i, "print double x")
 
     assert_eq(transcript(i), "8")
+
+// -- the console loop ------------------------------------------------------------------------------
+//
+// **`session` is tested here because it lives here**, and it lives here because there is more than one
+// console: a desktop terminal, a Pico 2 W, an STM32 to come, and the Pico's other core. Written out
+// per platform it would be four copies that drift. Taking the interpreter as a parameter is what makes
+// it checkable at all — a cursor over a byte script goes in, and `transcript` comes out.
+
+// The cursor a test hands it: `sysl.io`'s cooked line reader over a fixed script, which is one of the
+// two things a real console supplies (the other being a line editor over a port).
+private ran(script: string) -> string
+    var src = bytes_reader(script.bytes)
+    var cursor = console_lines(&src)
+    var i = ogol()
+
+    session(i, &cursor)
+    transcript(i)
+end ran
+
+@test
+a_session_runs_each_line_and_prints_what_it_came_to() =
+    assert_eq(ran("print 6 * 7\nprint 1 + 1\n"), "42\n2")
+
+@test
+a_session_keeps_its_state_between_lines() =
+    assert_eq(ran("set x 5\nprint x\n"), "5")
+
+// The continuation prompt is the reason `Fault` has two sides: an unfinished line is held rather than
+// refused, and the next line is added to it.
+@test
+an_unfinished_definition_is_held_until_it_finishes() =
+    assert_eq(ran("to double :n\n  output n * 2\nend\nprint double 21\n"), "42")
+
+// **The refusal is not in the transcript, and that is right.** `transcript` is what the *program*
+// printed; a refusal is the console's own message about a line that would not run, and it goes to the
+// console's output rather than into the interpreter. What this pins is that the session survives one
+// and goes on to the next line.
+@test
+a_refusal_does_not_end_the_session() =
+    assert_eq(ran("print nosuchname\nprint 1\n"), "1")
+
+// `bye` on a line of its own ends the walk; what a caller does about that differs by platform, which
+// is why `session` returns rather than exiting.
+@test
+bye_ends_the_session() =
+    assert_eq(ran("print 1\nbye\nprint 2\n"), "1")
+
+// A command answers with nothing, and a console that echoed a blank line for every `print` would
+// double every program's output.
+@test
+a_command_echoes_nothing_of_its_own() =
+    assert_eq(ran("set x 1\n"), "")

@@ -8,14 +8,14 @@
 // This is the block a *consumer* writes to reach it:
 //
 //     dependencies {
-//       ogol { git = "github.com/sysl-lang/ogol", version = "0.1.0" }
+//       ogol { git = "github.com/sysl-lang/ogol", version = "0.2.0" }
 //     }
 //
 // The coordinate names the package, `ogol`; the module a program imports is `sh.sysl.ogol`.
 
 package {
   name    = "ogol"
-  version = "0.1.0"
+  version = "0.2.0"
 }
 
 // **`alloc = true`, and it is a decision rather than an oversight.** An interpreter grows a token
