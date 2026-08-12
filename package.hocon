@@ -18,11 +18,11 @@ package {
   version = "0.2.0"
 }
 
-// **`alloc = true`, and it is a decision rather than an oversight.** An interpreter grows a token
+// **`heap = true`, and it is a decision rather than an oversight.** An interpreter grows a token
 // list, a syntax tree and a dictionary while it reads, and the sizes of all three are the user's to
 // choose at the keyboard. The board this is aimed at links newlib's heap whether or not a program
 // touches it, so the capability costs nothing that is not already spent -- and asking for it is what
 // lets a name be a `string` and a body be a `Buf`, rather than an offset into a fixed arena.
 requires {
-  alloc = true
+  heap = true
 }
