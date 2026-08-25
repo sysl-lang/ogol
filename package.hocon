@@ -8,14 +8,14 @@
 // This is the block a *consumer* writes to reach it:
 //
 //     dependencies {
-//       ogol { git = "github.com/sysl-lang/ogol", version = "0.3.0" }
+//       ogol { git = "github.com/sysl-lang/ogol", version = "0.3.1" }
 //     }
 //
 // The coordinate names the package, `ogol`; the module a program imports is `sh.sysl.ogol`.
 
 package {
   name    = "ogol"
-  version = "0.3.0"
+  version = "0.3.1"
 
   // **The oldest compiler this builds with.** `sh.sysl.parsing` states 0.0.76 as its own floor, so a
   // consumer of it cannot ask for less; the reader below adds nothing newer of its own.
@@ -26,8 +26,17 @@ package {
 // table and a binding-power loop are the same in every grammar, and Ogol had a hand-rolled copy of
 // the first two. What the coordinate buys is that the copy is gone and that a diagnostic can say
 // *where* -- which is the half a 257-line cursor was never going to grow on its own.
+//
+// **0.2.1 rather than 0.2.0, and 0.3.1 here, because 0.3.0 COULD NOT BE BUILT FOR A BOARD.** Three
+// module-level `val`s -- two `ByteSet` tables here and a two-byte line ending in `parsing` -- are
+// module storage, which an initializer fills before a program's statements run; a `build-c` archive
+// for a freestanding target has no entry point and no loader to run one, so `@export("main")`
+// reaching any of them was refused. Both repos moved the storage out. **Nothing in `sysl test .` can
+// see this**, because that runs on the host: the check is
+// `sysl build-c <program> --target thumb-freestanding-softfp`, and it belongs in the loop of any
+// change here that adds a module-level binding.
 dependencies {
-  parsing { git = "github.com/sysl-lang/parsing", version = "0.2.0" }
+  parsing { git = "github.com/sysl-lang/parsing", version = "0.2.1" }
 }
 
 // **`heap = true`, and it is a decision rather than an oversight.** An interpreter grows a token

@@ -112,7 +112,7 @@ that at the point of the mistake.
 
 ```
 dependencies {
-  ogol { git = "github.com/sysl-lang/ogol", version = "0.3.0" }
+  ogol { git = "github.com/sysl-lang/ogol", version = "0.3.1" }
 }
 ```
 
@@ -162,6 +162,20 @@ sysl test .
 
 Ninety-nine of them, and nearly all are written through the transcript — what a person typing would see —
 rather than through the syntax tree, because the transcript is what is promised.
+
+**And one check that is a command rather than a test, because the suite runs on a host and cannot see
+it.** A module-level binding in this package — or in one it depends on — is module storage, which an
+initializer fills before a program's statements run; a `build-c` archive for a freestanding target has
+no entry point and no loader to run one, so `@export("main")` reaching one is refused and the language
+cannot be put on a board at all. v0.3.0 shipped exactly that defect and v0.3.1 is the fix. Run this
+whenever anything here grows a module-level `val`:
+
+```
+sysl build-c <a program with @export("main") calling run> --target thumb-freestanding-softfp
+```
+
+`private const` is not a way round it: `byte_set_of("…")` is a call, and a call is not a constant
+expression. A set belongs in a local or on a struct.
 
 ## Where it is going
 

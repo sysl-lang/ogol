@@ -63,14 +63,29 @@ spell(t: Token) -> string
         Eof -> "the end of the input"
 end spell
 
-// What ends a bare run of characters. The four arithmetic signs are in the set, which is what makes
-// `n-1` three tokens rather than one name -- and is the reason a procedure's name may not carry a
-// hyphen.
+// What ends a bare run of characters, and which bytes are single-character operators.
 //
-// **It is a table rather than a chain of comparisons**, which is what a `ByteSet` is for: four words
-// on the stack and one shift-and-test per byte, where the eleven `||` this replaces was eleven
-// branches on every character of every name.
-private val delimiters: ByteSet = byte_set_of(" \t\n\r()[]+-*/=<>;")
+// The four arithmetic signs are in the delimiter set, which is what makes `n-1` three tokens rather
+// than one name -- and is the reason a procedure's name may not carry a hyphen.
+//
+// **They are tables rather than chains of comparisons**, which is what a `ByteSet` is for: four words
+// and one shift-and-test per byte, where the eleven `||` this replaced was eleven branches on every
+// character of every name.
+//
+// **AND THEY ARE FIELDS ON THE LEXER RATHER THAN MODULE-LEVEL `val`s, WHICH IS NOT A STYLE CHOICE.** A
+// module-level binding is *module storage*, filled by an initializer before a program's statements
+// run -- and a `build-c` archive for a freestanding target has no entry point and no loader to run
+// one, so an `@export("main")` reaching one is refused outright. That is every board this language
+// exists for. `private const` is not the way out either: `byte_set_of(...)` is a call, and a call is
+// "not a constant expression". So the sets are built once per `tokens` call, which is sixteen and six
+// iterations of a shift-and-or -- nothing beside lexing the line they are built for.
+private struct Sets
+    delimiters: ByteSet
+    operators: ByteSet
+
+// The single-character operators. The two-character ones are matched before these, so that `<=` is
+// never read as `<` and then `=`.
+private sets() -> Sets = Sets(byte_set_of(" \t\n\r()[]+-*/=<>;"), byte_set_of("+*/=<>"))
 
 // The largest value a `Number` can hold. It is written as a `val` with its type on it because the
 // literal is larger than an `int` and cannot be one.
@@ -79,6 +94,7 @@ private val number_max: ulong = 9223372036854775807
 private struct Lexer
     text: string
     s: Scanner
+    sets: Sets
 
     // The byte before the cursor, which is the one thing a forward cursor cannot be asked for and the
     // one thing the minus rule needs. It is a look at the input rather than a move, so it is here
@@ -113,7 +129,7 @@ private struct Lexer
     private run_to_delimiter(*self) -> string
         val from = self.s.offset
 
-        self.s.skip_until_set(delimiters)
+        self.s.skip_until_set(self.sets.delimiters)
         self.text[from..<self.s.offset]
 
     // `12x` is one token and a malformed one, not a number beside a name. The check costs a byte of
@@ -134,7 +150,7 @@ private struct Lexer
 
                 self.s.peek() match
                     Some(c) ->
-                        if !delimiters.has(c) then
+                        if !self.sets.delimiters.has(c) then
                             return Err(BadAt(s"'${self.text[self.s.offset..<self.s.offset + 1]}' cannot follow a number",
                                              self.s.here()))
                     None -> ()
@@ -202,15 +218,11 @@ private struct Lexer
 
         if self.s.accept_seq(">=".bytes) then return Ok(Operator(">="))
 
-        if self.s.accept_set(operators) then return Ok(Operator(self.text[from..<self.s.offset]))
+        if self.s.accept_set(self.sets.operators) then return Ok(Operator(self.text[from..<self.s.offset]))
 
         Ok(Name(self.run_to_delimiter()))
     end token
 end Lexer
-
-// The single-character operators, tried after the two-character ones so that `<=` is never read as
-// `<` and then `=`.
-private val operators: ByteSet = byte_set_of("+*/=<>")
 
 // Either byte of a line ending, or a blank. It is what "there is space here" means to the minus rule,
 // and it is one function rather than four comparisons written twice.
@@ -222,7 +234,7 @@ private is_break(c: u8) -> bool = c == u8(' ') || c == u8('\t') || c == u8('\n')
 // to decide what a minus is and how far an argument reaches, and a stream that could fail on the
 // lookahead would put a lexical error in the middle of a syntactic decision.
 tokens(text: string) -> Result[Tokens[Token], Fault]
-    var lx = Lexer(text, scanner_of(text))
+    var lx = Lexer(text, scanner_of(text), sets())
     var out: Buf[Spanned[Token]] = buf()
 
     loop
