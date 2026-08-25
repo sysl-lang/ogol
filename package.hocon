@@ -8,7 +8,7 @@
 // This is the block a *consumer* writes to reach it:
 //
 //     dependencies {
-//       ogol { git = "github.com/sysl-lang/ogol", version = "0.2.0" }
+//       ogol { git = "github.com/sysl-lang/ogol", version = "0.3.0" }
 //     }
 //
 // The coordinate names the package, `ogol`; the module a program imports is `sh.sysl.ogol`.
