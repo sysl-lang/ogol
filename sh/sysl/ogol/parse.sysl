@@ -1,5 +1,6 @@
 module sh.sysl.ogol
 
+import sh.sysl.parsing.{Span, Spanned, TokenStream, Tokens, pratt}
 import sysl.buf.{Buf, buf}
 
 // Tokens to a tree.
@@ -14,6 +15,13 @@ import sysl.buf.{Buf, buf}
 // statement ends at the end of its line, and the only two things that may span one are a bracketed
 // block and a definition -- both of which are visible in the text, so a console can tell "unfinished"
 // from "wrong" and say so.
+//
+// **The expression half is `sh.sysl.parsing.pratt` and not a function per precedence level.** Four
+// functions -- `comparison`, `sum`, `product`, `unary` -- each testing a handful of operators and
+// calling the next, are one table of binding powers and two callbacks here. What made that possible is
+// that the loop hands its callbacks the *parser* rather than a token cursor: `nud` has to know a name's
+// arity before it can read that name's arguments, and the dictionary that answers is a field on
+// `Parser`. So `Parser` is the `TokenStream`, and the callbacks reach everything a member would.
 
 // How many arguments each of the built-in names takes. It is the whole vocabulary of the language
 // beside the operators: seven names, chosen so that nothing here is a convenience -- take any one away
@@ -59,22 +67,125 @@ private arguments(n: usize) -> string = if n == 1 then "1 argument" else s"$n ar
 // Deep enough for anything written at a keyboard, and shallow enough that the recursive walks below
 // cannot run a small stack out. The parser is the only thing that builds a nested tree, so capping it
 // here is what bounds evaluation and rendering too.
-private const max_depth: int = 64
+private const max_depth: usize = 64
+
+// How tightly each operator pulls what is on its left, and 0 for everything that is not one.
+//
+// **Three levels, and the whole precedence table is these ten lines.** The comparisons bind loosest,
+// so `count + 1 > limit` compares the sum; nothing chains, because every one of them is left
+// associative and `led` recurses at its own power.
+//
+// **A minus with a space on its left and none on its right answers 0**, which is what stops the loop
+// -- and is the same decision the old `sum` made with a `break`. It is not an operator at all there:
+// it opens the next argument, and `pin 15 -1` passes two of them.
+private lbp(t: Spanned[Token]) -> u8
+    t.value match
+        Operator("=") -> 1
+        Operator("<>") -> 1
+        Operator("<") -> 1
+        Operator(">") -> 1
+        Operator("<=") -> 1
+        Operator(">=") -> 1
+        Operator("+") -> 2
+        Minus(before, after) -> if before && !after then 0 else 2
+        Operator("*") -> 3
+        Operator("/") -> 3
+        _ -> 0
+end lbp
+
+// An operator with the expression it was handed on its left, and whatever it reads on its right.
+//
+// Every one of Ogol's is left associative, so the recursion is at the operator's own power: a second
+// operator of the same strength stops the inner loop and `8 - 4 - 2` is `(8 - 4) - 2`.
+private led(left: Result[&Expr, Fault], t: Spanned[Token], s: *Parser) -> Result[&Expr, Fault]
+    val l = left?
+    val op = t.value match
+        Minus(_, _) -> "-"
+        Operator(name) -> name
+        _ -> ""
+
+    pratt(s, lbp(t), nud, led, lbp) match
+        None -> Err(BadAt(s"'$op' needs something after it", t.span))
+        Some(right) -> Ok(Binary(op, l, right?))
+end led
+
+// A token in prefix position: a literal, a name, a bracket, a negation.
+//
+// **The depth is counted here and nowhere else**, because this is the one function every nesting goes
+// through -- an argument, a parenthesis, a bracket and a negation all reach their contents by coming
+// back round to it. The counter is raised on the way in and lowered on the way out, which is why the
+// body is a second function: a `?` in it would otherwise leave the count raised.
+private nud(t: Spanned[Token], s: *Parser) -> Result[&Expr, Fault]
+    if s.depth >= max_depth then return Err(BadAt("that is nested too deeply", t.span))
+
+    s.depth += 1
+
+    val out = nud_at(t, s)
+
+    s.depth -= 1
+    out
+end nud
+
+private nud_at(t: Spanned[Token], s: *Parser) -> Result[&Expr, Fault]
+    t.value match
+        Number(n) -> Ok(Literal(Num(n)))
+        Quoted(w) -> Ok(Literal(Word(w)))
+        Open ->
+            val inner = s.expression()?
+            val after = s.current()
+
+            after.value match
+                Close ->
+                    s.bump()
+                    Ok(inner)
+                Eof -> Err(More)
+                _ -> Err(BadAt(s"')' expected, not ${spell(after.value)}", after.span))
+        OpenBlock -> s.bracket()
+        // Nothing may be negated but an operand, so `- - 1` is refused rather than read as a double
+        // negative -- which keeps the one wart in the language to a single rule.
+        Minus(_, _) ->
+            s.ts.advance() match
+                None -> Err(More)
+                Some(inner) ->
+                    inner.value match
+                        Minus(_, _) -> Err(BadAt("'-' needs something in front of it", inner.span))
+                        _ -> Ok(Negate(nud(inner, s)?))
+        Name("to") -> Err(BadAt("'to' starts a definition and cannot be part of an expression", t.span))
+        Name("end") -> Err(BadAt("'end' closes a definition, and there is none open", t.span))
+        Name("set") -> s.assignment(t.span)
+        Name(n) -> s.call(n, t.span)
+        Param(p) -> Err(BadAt(s"':$p' names a parameter, which only a 'to' line may do", t.span))
+        Operator(op) -> Err(BadAt(s"'$op' needs something in front of it", t.span))
+        Close -> Err(BadAt("')' closes something that was never opened", t.span))
+        CloseBlock -> Err(BadAt("']' closes something that was never opened", t.span))
+        LineBreak -> Err(BadAt("the line ends before the value it was building", t.span))
+        Eof -> Err(More)
+end nud_at
 
 private struct Parser
-    ts: &Buf[Token]
-    at: usize
+    ts: Tokens[Token]
     procs: &Procs
 
-    peek(self) -> Token = self.ts.at(self.at)
+    // How deep the reader is inside its own recursion. It is a field rather than a parameter because
+    // `pratt`'s callbacks are bare arrows and carry nothing of their own -- what they are handed is
+    // this parser, so what they need has to be on it.
+    depth: usize
+
+    // The token at the cursor. The stream always ends with exactly one `Eof`, so there is always a
+    // token; a cursor that has somehow gone past it answers `Eof` again rather than nothing, because
+    // every reader below is written against a token rather than against an option.
+    private current(self) -> Spanned[Token]
+        self.ts.peek() match
+            Some(t) -> t
+            None -> Spanned(Eof, self.ts.here())
 
     bump(*self)
-        self.at += 1
+        val _ = self.ts.advance()
 
     // Where a statement may stop. A close bracket and a close paren are in the set because a statement
     // list is read the same way inside a block as at the top level, and the thing that ends it differs.
     private at_terminator(self) -> bool
-        self.peek() match
+        self.current().value match
             LineBreak -> true
             Eof -> true
             CloseBlock -> true
@@ -83,11 +194,10 @@ private struct Parser
     end at_terminator
 
     private skip_breaks(*self)
-        while true
-            self.peek() match
+        loop
+            self.current().value match
                 LineBreak -> self.bump()
                 _ -> break
-    end skip_breaks
 
     arity_of(self, name: string) -> usize
         builtin_arity(name) match
@@ -98,24 +208,33 @@ private struct Parser
                     None -> 0
     end arity_of
 
+    // One expression, at the loosest binding power.
+    //
+    // `pratt` answers `None` only where the stream was empty, which cannot happen here -- the lexer
+    // ends every stream with an `Eof` and `nud` reads that as a request for more text.
+    private expression(*self) -> Result[&Expr, Fault]
+        pratt(self, 0, nud, led, lbp) match
+            Some(r) -> r
+            None -> Err(More)
+
     // --- Statements -------------------------------------------------------------------------------
 
     // Every statement up to the token that ends the list, with `to` allowed only where a definition may
     // appear. A block and a procedure body are read by this too, which is what makes a block's contents
     // the same language as a line's.
-    private statements(*self, top: bool, depth: int) -> Result[&Buf[&Expr], Fault]
+    private statements(*self, top: bool) -> Result[&Buf[&Expr], Fault]
         var out: &Buf[&Expr] = buf()
 
-        while true
+        loop
             self.skip_breaks()
 
-            self.peek() match
+            self.current().value match
                 Eof -> break
                 CloseBlock -> break
                 Close -> break
                 _ -> ()
 
-            var stmt = self.statement(top, depth)?
+            var stmt = self.statement(top)?
 
             out.push(stmt)
             self.surplus(stmt)?
@@ -123,21 +242,25 @@ private struct Parser
         Ok(out)
     end statements
 
-    private statement(*self, top: bool, depth: int) -> Result[&Expr, Fault]
-        self.peek() match
+    private statement(*self, top: bool) -> Result[&Expr, Fault]
+        val head = self.current()
+
+        head.value match
             Name("to") ->
                 if !top then
-                    return Err(Bad("'to' starts a definition, which cannot go inside another one"))
+                    return Err(BadAt("'to' starts a definition, which cannot go inside another one",
+                                     head.span))
 
-                self.definition(depth)
-            _ -> self.expression(depth)
+                self.definition()
+            _ -> self.expression()
     end statement
 
     // **What is left on the line after a statement, and the one diagnostic that teaches something.**
     // Arity says how many arguments a command takes, so anything still sitting on the line that is not
     // the start of another command was an argument too many -- and by far the likeliest reason is the
     // space around a minus sign, since `count -1` is two things and `count - 1` is one. The count is
-    // reported by reading the surplus rather than by guessing at it.
+    // reported by reading the surplus rather than by guessing at it, and the caret goes under the
+    // surplus rather than under the command, because the surplus is the part to delete.
     private surplus(*self, stmt: &Expr) -> Result[unit, Fault]
         var head = head_of(stmt)
 
@@ -145,18 +268,21 @@ private struct Parser
 
         var negative = false
 
-        self.peek() match
+        self.current().value match
             Minus(before, after) -> negative = before && !after
             _ -> ()
 
+        val from = self.ts.mark()
         var extra: usize = 0
 
-        while !self.at_terminator()
-            self.peek() match
+        loop
+            if self.at_terminator() then break
+
+            self.current().value match
                 Name(_) -> break
                 _ -> ()
 
-            self.expression(1)?
+            self.expression()?
             extra += 1
 
         if extra == 0 then return Ok(())
@@ -167,30 +293,32 @@ private struct Parser
                    else
                        ""
 
-        Err(Bad(s"'$head' needs ${arguments(want)}, got ${arguments(want + extra)}$note"))
+        Err(BadAt(s"'$head' needs ${arguments(want)}, got ${arguments(want + extra)}$note",
+                  self.ts.span_from(from)))
     end surplus
 
     // `to name :a :b`, its body, and `end`. The definition is entered in the dictionary before the body
     // is read, because the body may call it -- and taken back out if the body turns out not to parse, so
     // that a definition that was refused is one the language has never heard of.
-    private definition(*self, depth: int) -> Result[&Expr, Fault]
+    private definition(*self) -> Result[&Expr, Fault]
         self.bump()
 
+        val titled = self.current()
         var name = ""
 
-        self.peek() match
+        titled.value match
             Name(n) -> name = n
-            _ -> return Err(Bad(s"'to' needs a name, not ${spell(self.peek())}"))
+            _ -> return Err(BadAt(s"'to' needs a name, not ${spell(titled.value)}", titled.span))
 
         self.bump()
 
         if builtin_arity(name).is_some() then
-            return Err(Bad(s"'$name' is built in and cannot be redefined"))
+            return Err(BadAt(s"'$name' is built in and cannot be redefined", titled.span))
 
         var params: &Buf[string] = buf()
 
-        while true
-            self.peek() match
+        loop
+            self.current().value match
                 Param(p) ->
                     params.push(p)
                     self.bump()
@@ -201,7 +329,7 @@ private struct Parser
 
         self.procs.define(p)
 
-        var body = self.body(depth)
+        var body = self.body()
 
         body match
             Ok(b) ->
@@ -215,20 +343,20 @@ private struct Parser
                 Err(f)
     end definition
 
-    private body(*self, depth: int) -> Result[&Buf[&Expr], Fault]
+    private body(*self) -> Result[&Buf[&Expr], Fault]
         var out: &Buf[&Expr] = buf()
 
-        while true
+        loop
             self.skip_breaks()
 
-            self.peek() match
+            self.current().value match
                 Eof -> return Err(More)
                 Name("end") ->
                     self.bump()
                     break
                 _ -> ()
 
-            var stmt = self.statement(false, depth)?
+            var stmt = self.statement(false)?
 
             out.push(stmt)
             self.surplus(stmt)?
@@ -238,151 +366,36 @@ private struct Parser
 
     // --- Expressions ------------------------------------------------------------------------------
 
-    private expression(*self, depth: int) -> Result[&Expr, Fault]
-        if depth > max_depth then return Err(Bad("that is nested too deeply"))
-
-        self.comparison(depth)
-    end expression
-
-    // The comparisons bind loosest, so `count + 1 > limit` compares the sum. They do not chain: a
-    // comparison of a comparison is legal and answers what it says, which is the same rule the
-    // arithmetic below it follows.
-    private comparison(*self, depth: int) -> Result[&Expr, Fault]
-        var left = self.sum(depth)?
-
-        while true
-            var op = ""
-
-            self.peek() match
-                Operator("=") -> op = "="
-                Operator("<>") -> op = "<>"
-                Operator("<") -> op = "<"
-                Operator(">") -> op = ">"
-                Operator("<=") -> op = "<="
-                Operator(">=") -> op = ">="
-                _ -> break
-
-            self.bump()
-            left = Binary(op, left, self.sum(depth + 1)?)
-
-        Ok(left)
-    end comparison
-
-    // **The minus is decided here, and it is decided by the space around it.** A minus with a space on
-    // its left and none on its right is not an operator at all -- it opens the next argument -- so the
-    // loop stops and the caller reads it as one. Every other spelling continues the sum.
-    private sum(*self, depth: int) -> Result[&Expr, Fault]
-        var left = self.product(depth)?
-
-        while true
-            var op = ""
-
-            self.peek() match
-                Operator("+") -> op = "+"
-                Minus(before, after) ->
-                    if before && !after then break
-                    op = "-"
-                _ -> break
-
-            self.bump()
-            left = Binary(op, left, self.product(depth + 1)?)
-
-        Ok(left)
-    end sum
-
-    private product(*self, depth: int) -> Result[&Expr, Fault]
-        var left = self.unary(depth)?
-
-        while true
-            var op = ""
-
-            self.peek() match
-                Operator("*") -> op = "*"
-                Operator("/") -> op = "/"
-                _ -> break
-
-            self.bump()
-            left = Binary(op, left, self.unary(depth + 1)?)
-
-        Ok(left)
-    end product
-
-    // Nothing may be negated but an operand, so `- - 1` is refused rather than read as a double
-    // negative -- which keeps the one wart in the language to a single rule.
-    private unary(*self, depth: int) -> Result[&Expr, Fault]
-        self.peek() match
-            Minus(_, _) ->
-                self.bump()
-                Ok(Negate(self.primary(depth + 1)?))
-            _ -> self.primary(depth)
-    end unary
-
-    private primary(*self, depth: int) -> Result[&Expr, Fault]
-        if depth > max_depth then return Err(Bad("that is nested too deeply"))
-
-        self.peek() match
-            Number(n) ->
-                self.bump()
-                Ok(Literal(Num(n)))
-            Quoted(s) ->
-                self.bump()
-                Ok(Literal(Word(s)))
-            Open ->
-                self.bump()
-
-                var inner = self.expression(depth + 1)?
-
-                self.peek() match
-                    Close ->
-                        self.bump()
-                        Ok(inner)
-                    Eof -> Err(More)
-                    _ -> Err(Bad(s"')' expected, not ${spell(self.peek())}"))
-            OpenBlock -> self.bracket(depth)
-            Name("to") -> Err(Bad("'to' starts a definition and cannot be part of an expression"))
-            Name("end") -> Err(Bad("'end' closes a definition, and there is none open"))
-            Name("set") -> self.assignment(depth)
-            Name(n) -> self.call(n, depth)
-            Param(p) -> Err(Bad(s"':$p' names a parameter, which only a 'to' line may do"))
-            Operator(op) -> Err(Bad(s"'$op' needs something in front of it"))
-            Minus(_, _) -> Err(Bad("'-' needs something in front of it"))
-            Close -> Err(Bad("')' closes something that was never opened"))
-            CloseBlock -> Err(Bad("']' closes something that was never opened"))
-            LineBreak -> Err(Bad("the line ends before the value it was building"))
-            Eof -> Err(More)
-    end primary
-
     // `set count 0`. The target is a name rather than a value, which is why this is not an ordinary
     // call -- everything else in the language evaluates every argument it is given.
-    private assignment(*self, depth: int) -> Result[&Expr, Fault]
-        self.bump()
-
+    private assignment(*self, at: Span) -> Result[&Expr, Fault]
+        val named = self.current()
         var target = ""
 
-        self.peek() match
+        named.value match
             Name(n) -> target = n
-            Param(p) -> return Err(Bad(s"write 'set $p', not 'set :$p' -- the colon is for a 'to' line"))
-            _ -> return Err(Bad(s"'set' needs a name to set, not ${spell(self.peek())}"))
+            Param(p) ->
+                return Err(BadAt(s"write 'set $p', not 'set :$p' -- the colon is for a 'to' line",
+                                 named.span))
+            _ -> return Err(BadAt(s"'set' needs a name to set, not ${spell(named.value)}", named.span))
 
         self.bump()
 
         if builtin_arity(target).is_some() then
-            return Err(Bad(s"'$target' is built in and cannot be used as a variable"))
+            return Err(BadAt(s"'$target' is built in and cannot be used as a variable", named.span))
 
-        Ok(Assign(target, self.expression(depth + 1)?))
+        Ok(Assign(target, self.expression()?))
     end assignment
 
-    private call(*self, name: string, depth: int) -> Result[&Expr, Fault]
-        self.bump()
-
+    private call(*self, name: string, at: Span) -> Result[&Expr, Fault]
         var want = self.arity_of(name)
         var args: &Buf[&Expr] = buf()
 
         for i in 0..<want
             if self.at_terminator() then
-                return Err(Bad(s"'$name' needs ${arguments(want)}, got ${arguments(i)}"))
+                return Err(BadAt(s"'$name' needs ${arguments(want)}, got ${arguments(i)}", at))
 
-            args.push(self.expression(depth + 1)?)
+            args.push(self.expression()?)
 
         Ok(Call(name, args))
     end call
@@ -402,17 +415,21 @@ private struct Parser
     // Reading twice rather than converting one to the other is what keeps both honest: a datum built
     // from statements could not hold `[a b c]`, whose words are calls to nothing, and statements
     // rebuilt from a datum would have to re-lex text this parser already has as tokens.
-    private bracket(*self, depth: int) -> Result[&Expr, Fault]
-        self.bump()
-
-        val start = self.at
-        val items = self.datum(depth)?
-        val after = self.at
+    //
+    // **The cursor is put back by hand and the depth is not**, which is worth saying because the
+    // second looks like an omission. This is the one refusal the reader catches and carries on from,
+    // so a depth counter that leaked a level per bracket would refuse the sixty-fifth of them -- and
+    // it cannot leak, because `nud` and `datum` each lower the count in a wrapper their `?` cannot
+    // escape. `tests.sysl` pins that with eighty brackets whose bodies do not parse.
+    private bracket(*self) -> Result[&Expr, Fault]
+        val start = self.ts.mark()
+        val items = self.datum()?
+        val after = self.ts.mark()
 
         // The same tokens again, as code. A `More` cannot arise here -- the datum reading above only
         // returns once it has seen the closing bracket -- so anything this refuses is a real fault,
         // and it is held rather than thrown.
-        self.at = start
+        self.ts.reset(start)
 
         var body: &Buf[&Expr] = buf()
         var why = ""
@@ -420,19 +437,19 @@ private struct Parser
         while why == ""
             self.skip_breaks()
 
-            self.peek() match
+            self.current().value match
                 Eof -> why = "the block does not end"
                 CloseBlock -> break
                 Close -> why = "')' cannot close a '['"
                 _ ->
-                    self.statement(false, depth + 1) match
+                    self.statement(false) match
                         Err(f) -> why = describe(f)
                         Ok(stmt) ->
                             self.surplus(stmt) match
                                 Err(f) -> why = describe(f)
                                 Ok(_) -> body.push(stmt)
 
-        self.at = after
+        self.ts.reset(after)
 
         Ok(Bracket(items, body, why))
     end bracket
@@ -446,35 +463,54 @@ private struct Parser
     //
     // A line break inside a bracket is not an element -- a list may be written across as many lines as
     // it likes, which is one of the two things Ogol lets span a line.
-    private datum(*self, depth: int) -> Result[&Buf[Value], Fault]
-        if depth > max_depth then return Err(Bad("these brackets are nested too deeply"))
+    private datum(*self) -> Result[&Buf[Value], Fault]
+        if self.depth >= max_depth then
+            return Err(BadAt("these brackets are nested too deeply", self.current().span))
 
+        self.depth += 1
+
+        val out = self.datum_at()
+
+        self.depth -= 1
+        out
+    end datum
+
+    private datum_at(*self) -> Result[&Buf[Value], Fault]
         var out: &Buf[Value] = buf()
 
         loop
-            self.peek() match
+            val t = self.current()
+
+            t.value match
                 Eof -> return Err(More)
                 CloseBlock ->
                     self.bump()
                     return Ok(out)
-                Close -> return Err(Bad("')' cannot close a '['"))
+                Close -> return Err(BadAt("')' cannot close a '['", t.span))
                 LineBreak -> self.bump()
                 OpenBlock ->
                     self.bump()
 
-                    val inner = self.datum(depth + 1)?
+                    val inner = self.datum()?
 
                     out.push(List(inner))
                 Number(n) ->
                     self.bump()
                     out.push(Num(n))
                 _ ->
-                    val t = self.peek()
-
                     self.bump()
-                    out.push(Word(spell(t)))
-    end datum
+                    out.push(Word(spell(t.value)))
+    end datum_at
 end Parser
+
+// The parser is the token stream the expression loop runs over, which is what lets `nud` and `led`
+// reach the procedure dictionary and the depth counter through the `*S` they are handed.
+impl TokenStream for Parser
+    type Token = Spanned[Token]
+
+    look(self) -> Option[Spanned[Token]] = self.ts.peek()
+
+    take(*self) -> Option[Spanned[Token]] = self.ts.advance()
 
 // The name a statement is headed by, or the empty string where it is not headed by one. It is what a
 // surplus is reported against, and an expression that is nobody's call has nothing to report against.
@@ -483,23 +519,23 @@ private head_of(e: &Expr) -> string
         Call(name, _) -> name
         Assign(_, _) -> "set"
         _ -> ""
-end head_of
 
 // A whole source text as the statements it holds, against a dictionary the definitions in it are added
 // to. The dictionary is the caller's rather than the parser's because reading and running are separate
 // steps and both need it -- and because in a console the text arrives one line at a time, with
 // everything the previous lines defined still standing.
 parse(text: string, into: &Procs) -> Result[&Buf[&Expr], Fault]
-    var ts = tokens(text)?
-    var p = Parser(ts, 0, into)
-    var out = p.statements(true, 0)?
+    var p = Parser(tokens(text)?, into, 0)
+    var out = p.statements(true)?
 
     // A statement list stops at whatever might have opened it, so a closer with nothing above it
     // reaches here rather than being refused where it was read. Both are named outright, because
     // "unexpected ']'" is a description of the parser's state and not of the reader's mistake.
-    p.peek() match
+    val last = p.current()
+
+    last.value match
         Eof -> Ok(out)
-        CloseBlock -> Err(Bad("']' closes something that was never opened"))
-        Close -> Err(Bad("')' closes something that was never opened"))
-        _ -> Err(Bad(s"${spell(p.peek())} has nothing to close"))
+        CloseBlock -> Err(BadAt("']' closes something that was never opened", last.span))
+        Close -> Err(BadAt("')' closes something that was never opened", last.span))
+        _ -> Err(BadAt(s"${spell(last.value)} has nothing to close", last.span))
 end parse

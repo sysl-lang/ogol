@@ -1,22 +1,55 @@
 module sh.sysl.ogol
 
-// What goes wrong, and the one distinction a console cares about.
+import sh.sysl.parsing.{Span, Source, error}
+
+// What goes wrong, and the two distinctions a console cares about.
 //
 // **`More` is not an error.** It is the answer when the text stops in the middle of something that
 // could still be finished -- an unclosed `[`, a `to` with no `end` under it. A file being read has run
 // out and that is a mistake; a person typing has simply not finished, and the caller is the only one
 // that knows which it is. Keeping the two apart here is what lets a REPL print a continuation prompt
 // instead of a complaint, and it is the whole reason this is an enum rather than a string.
+//
+// **`BadAt` carries a place and `Bad` does not, and the split is between reading and running.** The
+// reader has a cursor over the text, so everything it refuses can be pointed at -- and being pointed
+// at is most of what makes a refusal useful, because `'-' needs something in front of it` says
+// nothing about *which* minus on a line with three of them. The evaluator has a tree, whose nodes
+// carry no spans, and a runtime fault is about a value rather than about a position: `that is not a
+// number` is a complaint about what something came to, and the place it was written is not where the
+// mistake is.
+//
+// So the two are not a temporary state of affairs on the way to one. What would collapse them is
+// spans on `Expr`, and that is a different piece of work with a different argument behind it.
 enum Fault
     Bad(message: string)
+    BadAt(message: string, where: Span)
     More
-end Fault
 
-// A fault as the sentence a person reads. `More` renders as a complaint because a caller that has run
-// out of text and cannot ask for more is entitled to one -- a REPL never gets here, because it takes
-// the other branch and asks.
+// A fault as the sentence a person reads, with nothing quoted and nothing pointed at.
+//
+// `More` renders as a complaint because a caller that has run out of text and cannot ask for more is
+// entitled to one -- a REPL never gets here, because it takes the other branch and asks.
 describe(f: Fault) -> string
     f match
         Bad(message) -> message
+        BadAt(message, _) -> message
         More -> "the line stops in the middle of something"
-end describe
+
+// The same fault against the text it is about: the line quoted, and a caret under the thing that was
+// refused.
+//
+// **A fault with no place falls back to its sentence**, which is what makes this the one call a
+// console needs rather than two with a test between them. What comes back has no trailing newline in
+// either case, so it prints the same way.
+report(f: Fault, src: Source) -> string
+    f match
+        BadAt(message, where) -> trimmed(error(where, message).render(src))
+        _ -> describe(f)
+
+// A rendered diagnostic ends with a newline, because it is written to be printed one after another.
+// A console prints it through `print`, which adds one of its own, so the last one is taken off here
+// rather than leaving every refusal followed by a blank line.
+private trimmed(text: string) -> string
+    val b = text.bytes
+
+    if b.len > 0 && b[b.len - 1] == u8('\n') then text[0..<b.len - 1] else text

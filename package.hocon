@@ -15,7 +15,19 @@
 
 package {
   name    = "ogol"
-  version = "0.2.0"
+  version = "0.3.0"
+
+  // **The oldest compiler this builds with.** `sh.sysl.parsing` states 0.0.76 as its own floor, so a
+  // consumer of it cannot ask for less; the reader below adds nothing newer of its own.
+  sysl = "0.0.76"
+}
+
+// **The reader is `sh.sysl.parsing`'s, not this package's.** A byte cursor, a span, a line-start
+// table and a binding-power loop are the same in every grammar, and Ogol had a hand-rolled copy of
+// the first two. What the coordinate buys is that the copy is gone and that a diagnostic can say
+// *where* -- which is the half a 257-line cursor was never going to grow on its own.
+dependencies {
+  parsing { git = "github.com/sysl-lang/parsing", version = "0.2.0" }
 }
 
 // **`heap = true`, and it is a decision rather than an oversight.** An interpreter grows a token

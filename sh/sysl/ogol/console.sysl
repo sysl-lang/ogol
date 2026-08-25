@@ -1,5 +1,7 @@
 module sh.sysl.ogol
 
+import sh.sysl.parsing.source_of
+
 // The read-run-print loop, which is the same on every machine Ogol runs on.
 //
 // **It lives in the language rather than in each console, because there is more than one console and
@@ -25,9 +27,15 @@ module sh.sysl.ogol
 // the caller's**, and the two answers differ: a hosted program returns from `main`, while a board has
 // nowhere to exit *to* and says so rather than falling off the end.
 //
-// The **continuation prompt** is the reason `Fault` has two sides. A line that stops inside a `[` or
-// before an `end` has not gone wrong — it is held, `....` is printed, and the next line is added to
-// it. Anything else is a refusal, printed and dropped.
+// The **continuation prompt** is the reason `More` is a case of its own. A line that stops inside a
+// `[` or before an `end` has not gone wrong — it is held, `....` is printed, and the next line is
+// added to it. Anything else is a refusal, printed and dropped.
+//
+// **A refusal from the reader is printed against the text it was about**, with the line quoted and a
+// caret under the word — which is what the spans on the tokens are for and is worth most in a
+// console, where a held definition may be several lines long by the time something in it is refused.
+// A refusal from the evaluator has no place to point at and prints as its sentence; `report` answers
+// both, so there is one call here rather than a test.
 session(i: &Ogol, cursor: *Iterate[string])
     // What has been typed and not yet run, because it was not finished. Empty is the ordinary state.
     var pending = ""
@@ -51,7 +59,7 @@ session(i: &Ogol, cursor: *Iterate[string])
             Err(f) ->
                 f match
                     More -> pending = src
-                    Bad(message) -> print(message)
+                    _ -> print(report(f, source_of("<console>", src)))
 
         prints(if pending == "" then "ogol> " else ".... ")
 

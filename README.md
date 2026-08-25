@@ -112,7 +112,7 @@ that at the point of the mistake.
 
 ```
 dependencies {
-  ogol { git = "github.com/sysl-lang/ogol", version = "0.1.0" }
+  ogol { git = "github.com/sysl-lang/ogol", version = "0.3.0" }
 }
 ```
 
@@ -127,11 +127,31 @@ run(i, "print 6 * 7") match
 ```
 
 An interpreter is a value and carries the session: procedures and variables set by one call to `run`
-are there for the next. A `Fault` is either `Bad(message)` — a refusal, with the sentence to print —
-or `More`, which means the text stopped in the middle of a block or a definition and a console should
-ask for another line rather than complain.
+are there for the next.
 
-`requires { alloc = true }`. The board this is aimed at links a heap whether or not a program touches
+A `Fault` is one of three. `More` means the text stopped in the middle of a block or a definition, and
+a console should ask for another line rather than complain. The other two are both refusals and differ
+in whether there is a place to point at: `BadAt(message, where)` comes from the **reader**, which has a
+cursor over the text, and `Bad(message)` comes from the **evaluator**, which has a tree whose nodes
+carry no positions — `that divides by zero` is a complaint about what something came to rather than
+about where it was typed.
+
+So `describe(f)` answers the sentence and `report(f, src)` answers the whole diagnostic, with the line
+quoted and a caret under the word:
+
+```
+error: 'print' needs 1 argument, got 2 arguments
+ --> <console>:1:9
+  |
+1 | print 1 2
+  |         ^
+```
+
+`report` falls back to the sentence where there is no place, so a console needs one call rather than a
+test. Reading is `sh.sysl.parsing` — the byte cursor, the spans, the binding-power loop and the
+rendering above are all that package's, which is why this one is 250 lines shorter than it was.
+
+`requires { heap = true }`. The board this is aimed at links a heap whether or not a program touches
 it, so the capability costs nothing already spent.
 
 ## Tests
@@ -140,7 +160,7 @@ it, so the capability costs nothing already spent.
 sysl test .
 ```
 
-Fifty of them, and all of them are written through the transcript — what a person typing would see —
+Ninety-nine of them, and nearly all are written through the transcript — what a person typing would see —
 rather than through the syntax tree, because the transcript is what is promised.
 
 ## Where it is going

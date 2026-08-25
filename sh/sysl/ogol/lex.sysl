@@ -1,12 +1,17 @@
 module sh.sysl.ogol
 
+import sh.sysl.parsing.{ByteSet, Scanner, Span, Spanned, Tokens, byte_set_of, is_digit, point,
+                        read_digits, scanner_of, tokens_of}
 import sysl.buf.{Buf, buf}
-import sysl.text.{Ascii}
 
 // Text to tokens.
 //
+// **The cursor is `sh.sysl.parsing`'s and not this file's.** A byte cursor with lookahead, marks and
+// spans is the same in every grammar, and what is left here is only what is Ogol's: which bytes end a
+// word, what the tokens are, and the three decisions below that no general scanner could make.
+//
 // The grammar is Logo's and is nearly all decidable from one byte: `"` opens a word, a digit opens a
-// number, and anything else runs to the next delimiter and is a name. Two things are not.
+// number, and anything else runs to the next delimiter and is a name. Three things are not.
 //
 // **`:` marks a parameter being declared, and nothing else.** Logo writes it on every read as well --
 // `:n` for the value of `n` -- and Ogol does not, because one spelling for a name is easier to type and
@@ -61,197 +66,173 @@ end spell
 // What ends a bare run of characters. The four arithmetic signs are in the set, which is what makes
 // `n-1` three tokens rather than one name -- and is the reason a procedure's name may not carry a
 // hyphen.
-private delimits(c: u8) -> bool =
-    c.is_blank() || c == 10 || c == 13 ||
-        c == u8('(') || c == u8(')') || c == u8('[') || c == u8(']') ||
-        c == u8('+') || c == u8('-') || c == u8('*') || c == u8('/') ||
-        c == u8('=') || c == u8('<') || c == u8('>') || c == u8(';')
+//
+// **It is a table rather than a chain of comparisons**, which is what a `ByteSet` is for: four words
+// on the stack and one shift-and-test per byte, where the eleven `||` this replaces was eleven
+// branches on every character of every name.
+private val delimiters: ByteSet = byte_set_of(" \t\n\r()[]+-*/=<>;")
 
-// A digit run longer than this cannot be relied on to fit the 64-bit integer it is read into, so it is
-// refused rather than wrapped. Nineteen digits sometimes fit and sometimes do not; eighteen always do.
-private const max_digits: int = 18
+// The largest value a `Number` can hold. It is written as a `val` with its type on it because the
+// literal is larger than an `int` and cannot be one.
+private val number_max: ulong = 9223372036854775807
 
 private struct Lexer
     text: string
-    src: []const u8
-    at: usize
+    s: Scanner
 
-    done(self) -> bool = self.at >= self.src.len
-
-    bump(*self)
-        self.at += 1
+    // The byte before the cursor, which is the one thing a forward cursor cannot be asked for and the
+    // one thing the minus rule needs. It is a look at the input rather than a move, so it is here
+    // rather than in the scanner.
+    private previous(self) -> Option[u8]
+        if self.s.offset == 0 then None else Some(self.text.bytes[self.s.offset - 1])
 
     // Blanks and comments, which are the two things that separate tokens without being one. A newline
     // is neither -- it is a token here -- so this stops at one.
     skip_blanks(*self)
-        while !self.done()
-            var c = self.src[self.at]
+        loop
+            self.s.skip_blanks()
 
-            if c.is_blank() then
-                self.bump()
-            elif c == u8(';') then
-                while !self.done() && self.src[self.at] != 10 && self.src[self.at] != 13
-                    self.bump()
-            else
-                break
+            if !self.s.accept(u8(';')) then break
+
+            self.s.skip_to_line_end()
     end skip_blanks
 
     // Whether the byte before the cursor leaves an operand behind it. A bracket does not, which is why
     // it counts as space: `(-1)` and `( -1)` should not be different programs.
     private spaced_before(self) -> bool
-        if self.at == 0 then return true
-
-        var c = self.src[self.at - 1]
-
-        c.is_blank() || c == 10 || c == 13 || c == u8('(') || c == u8('[')
-    end spaced_before
+        self.previous() match
+            None -> true
+            Some(c) -> is_break(c) || c == u8('(') || c == u8('[')
 
     private spaced_after(self) -> bool
-        if self.at + 1 >= self.src.len then return true
+        self.s.peek_at(1) match
+            None -> true
+            Some(c) -> is_break(c)
 
-        var c = self.src[self.at + 1]
-
-        c.is_blank() || c == 10 || c == 13
-    end spaced_after
-
+    // A run up to the next delimiter, as the text it was written with.
     private run_to_delimiter(*self) -> string
-        var start = self.at
+        val from = self.s.offset
 
-        while !self.done() && !delimits(self.src[self.at])
-            self.bump()
-
-        self.text[start..<self.at]
-    end run_to_delimiter
+        self.s.skip_until_set(delimiters)
+        self.text[from..<self.s.offset]
 
     // `12x` is one token and a malformed one, not a number beside a name. The check costs a byte of
     // lookahead and turns a silent misreading into a sentence.
+    //
+    // **The overflow bound is the type's and not a digit count.** Reading it here used to stop at
+    // eighteen digits, because nineteen sometimes fit and sometimes do not; `read_digits` carries the
+    // test that asks whether the multiply and the add would fit before doing them, so the answer is
+    // now the real one and a nineteen-digit number that fits is a number.
     private read_number(*self) -> Result[Token, Fault]
-        var n: long = 0
-        var digits = 0
+        val from = self.s.offset
 
-        while !self.done() && self.src[self.at].is_digit()
-            n = n * 10 + long(int(self.src[self.at]) - 48)
-            digits += 1
+        read_digits(&self.s, 10) match
+            Err(_) -> return Err(BadAt("that number is too large", self.s.span_from(from)))
+            Ok(v) ->
+                if v > number_max then
+                    return Err(BadAt("that number is too large", self.s.span_from(from)))
 
-            if digits > max_digits then return Err(Bad("that number is too large"))
+                self.s.peek() match
+                    Some(c) ->
+                        if !delimiters.has(c) then
+                            return Err(BadAt(s"'${self.text[self.s.offset..<self.s.offset + 1]}' cannot follow a number",
+                                             self.s.here()))
+                    None -> ()
 
-            self.bump()
-
-        if !self.done() && !delimits(self.src[self.at]) then
-            return Err(Bad(s"'${self.text[self.at..<self.at + 1]}' cannot follow a number"))
-
-        Ok(Number(n))
+                Ok(Number(long(v)))
     end read_number
 
-    next(*self) -> Result[Token, Fault]
+    next(*self) -> Result[Spanned[Token], Fault]
         self.skip_blanks()
 
-        if self.done() then return Ok(Eof)
+        val from = self.s.offset
 
-        var c = self.src[self.at]
+        if self.s.at_end() then return Ok(Spanned(Eof, point(from)))
 
-        if c == 13
-            self.bump()
-            if !self.done() && self.src[self.at] == 10 then self.bump()
-            return Ok(LineBreak)
+        val here = self.token(from)?
 
-        if c == 10
-            self.bump()
-            return Ok(LineBreak)
+        Ok(Spanned(here, self.s.span_from(from)))
+    end next
 
-        if c == u8('(')
-            self.bump()
-            return Ok(Open)
+    private token(*self, from: usize) -> Result[Token, Fault]
+        if self.s.accept_newline() then return Ok(LineBreak)
 
-        if c == u8(')')
-            self.bump()
-            return Ok(Close)
+        if self.s.accept(u8('(')) then return Ok(Open)
 
-        if c == u8('[')
-            self.bump()
-            return Ok(OpenBlock)
+        if self.s.accept(u8(')')) then return Ok(Close)
 
-        if c == u8(']')
-            self.bump()
-            return Ok(CloseBlock)
+        if self.s.accept(u8('[')) then return Ok(OpenBlock)
 
-        if c == u8('"')
-            self.bump()
-            return Ok(Quoted(self.run_to_delimiter()))
+        if self.s.accept(u8(']')) then return Ok(CloseBlock)
 
-        if c == u8(':')
-            self.bump()
+        if self.s.accept(u8('"')) then return Ok(Quoted(self.run_to_delimiter()))
 
-            var name = self.run_to_delimiter()
+        if self.s.accept(u8(':'))
+            val name = self.run_to_delimiter()
 
-            if name == "" then return Err(Bad("':' needs a parameter name after it"))
+            if name == "" then
+                return Err(BadAt("':' needs a parameter name after it", self.s.span_from(from)))
 
             return Ok(Param(name))
-
-        if c.is_digit() then return self.read_number()
 
         // The one token whose meaning is in the space around it, recorded before the cursor moves off
         // it. `x- y` is the shape with no reading at all -- a binary minus is written with space on
         // both sides or neither -- so it is refused here rather than parsed into something nobody
         // meant.
-        if c == u8('-')
-            var before = self.spaced_before()
-            var after = self.spaced_after()
+        if self.s.peek() == Some(u8('-'))
+            val before = self.spaced_before()
+            val after = self.spaced_after()
 
-            self.bump()
+            self.s.bump()
 
             if !before && after then
-                return Err(Bad("'-' is written '- ' with a space each side to subtract, or '-' with none"))
+                return Err(BadAt("'-' is written '- ' with a space each side to subtract, or '-' with none",
+                                 self.s.span_from(from)))
 
             return Ok(Minus(before, after))
 
-        if c == u8('+') || c == u8('*') || c == u8('/') || c == u8('=')
-            self.bump()
-            return Ok(Operator(self.text[self.at - 1..<self.at]))
+        self.s.peek() match
+            Some(c) ->
+                if is_digit(c) then return self.read_number()
+            None -> ()
 
-        if c == u8('<')
-            self.bump()
+        if self.s.accept_seq("<=".bytes) then return Ok(Operator("<="))
 
-            if !self.done() && self.src[self.at] == u8('=')
-                self.bump()
-                return Ok(Operator("<="))
+        if self.s.accept_seq("<>".bytes) then return Ok(Operator("<>"))
 
-            if !self.done() && self.src[self.at] == u8('>')
-                self.bump()
-                return Ok(Operator("<>"))
+        if self.s.accept_seq(">=".bytes) then return Ok(Operator(">="))
 
-            return Ok(Operator("<"))
-
-        if c == u8('>')
-            self.bump()
-
-            if !self.done() && self.src[self.at] == u8('=')
-                self.bump()
-                return Ok(Operator(">="))
-
-            return Ok(Operator(">"))
+        if self.s.accept_set(operators) then return Ok(Operator(self.text[from..<self.s.offset]))
 
         Ok(Name(self.run_to_delimiter()))
-    end next
+    end token
 end Lexer
 
-// Every token in a source text, ending with exactly one `Eof`.
+// The single-character operators, tried after the two-character ones so that `<=` is never read as
+// `<` and then `=`.
+private val operators: ByteSet = byte_set_of("+*/=<>")
+
+// Either byte of a line ending, or a blank. It is what "there is space here" means to the minus rule,
+// and it is one function rather than four comparisons written twice.
+private is_break(c: u8) -> bool = c == u8(' ') || c == u8('\t') || c == u8('\n') || c == u8('\r')
+
+// Every token in a source text, ending with exactly one `Eof`, each with the span it was written at.
 //
 // The whole text is tokenized before anything is parsed, because the parser has to look ahead a token
 // to decide what a minus is and how far an argument reaches, and a stream that could fail on the
 // lookahead would put a lexical error in the middle of a syntactic decision.
-tokens(text: string) -> Result[&Buf[Token], Fault]
-    var lx = Lexer(text, text.bytes, 0)
-    var out: &Buf[Token] = buf()
+tokens(text: string) -> Result[Tokens[Token], Fault]
+    var lx = Lexer(text, scanner_of(text))
+    var out: Buf[Spanned[Token]] = buf()
 
-    while true
-        var t = lx.next()?
+    loop
+        val t = lx.next()?
 
         out.push(t)
 
-        t match
+        t.value match
             Eof -> break
             _ -> ()
 
-    Ok(out)
+    Ok(tokens_of(out))
 end tokens

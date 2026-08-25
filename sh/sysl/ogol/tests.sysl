@@ -1,6 +1,7 @@
 module sh.sysl.ogol
 @tests
 
+import sh.sysl.parsing.{Span, source_of}
 import sysl.buf.{Buf, buf}
 import sysl.io.{bytes_reader, console_lines}
 
@@ -20,15 +21,58 @@ private lexes(src: string) -> string
             var out = ""
 
             for i in 0..<ts.len()
-                ts.at(i) match
-                    Eof -> ()
-                    _ ->
-                        if out != "" then out = out + " "
-                        out = out + spell(ts.at(i))
+                ts.peek_at(i) match
+                    None -> ()
+                    Some(t) ->
+                        t.value match
+                            Eof -> ()
+                            _ ->
+                                if out != "" then out = out + " "
+                                out = out + spell(t.value)
 
             out
         Err(f) -> s"error: ${describe(f)}"
 end lexes
+
+// The same text as the spans its tokens were written at, so that a diagnostic pointing at one can be
+// asserted against what it points to. It is the half a hand-rolled cursor never had.
+private spans(src: string) -> string
+    tokens(src) match
+        Ok(ts) ->
+            var out = ""
+
+            for i in 0..<ts.len()
+                ts.peek_at(i) match
+                    None -> ()
+                    Some(t) ->
+                        t.value match
+                            Eof -> ()
+                            _ ->
+                                if out != "" then out = out + " "
+                                out = out + s"${spell(t.value)}@${t.span}"
+
+            out
+        Err(f) -> s"error: ${describe(f)}"
+end spans
+
+// The same for a fault that came out of *running* rather than reading, which is the half that has no
+// place to point at.
+private drawn_run(src: string) -> string
+    var i = ogol()
+
+    i.quiet = true
+
+    run(i, src) match
+        Ok(_) -> ""
+        Err(f) -> report(f, source_of("line", src))
+end drawn_run
+
+// What a refusal looks like drawn against the text it was about: the whole diagnostic, caret and all.
+// A fault carrying no place renders as its sentence, which is what makes this one helper.
+private drawn(src: string) -> string
+    parse(src, procs()) match
+        Ok(_) -> ""
+        Err(f) -> report(f, source_of("line", src))
 
 // What a program printed, one line per `print`, joined by newlines.
 private printed(src: string) -> string
@@ -437,3 +481,154 @@ bye_ends_the_session() =
 @test
 a_command_echoes_nothing_of_its_own() =
     assert_eq(ran("set x 1\n"), "")
+
+// --- Where a refusal is -------------------------------------------------------------------------
+
+@test
+every_token_carries_where_it_was_written() =
+    assert_eq(spans("print n-1"), "print@0..<5 n@6..<7 -@7..<8 1@8..<9")
+
+@test
+a_span_survives_the_line_it_is_on() =
+    assert_eq(spans("a\nb"), "a@0..<1 the end of the line@1..<2 b@2..<3")
+
+@test
+the_end_of_the_input_is_a_place_of_no_width() =
+    assert_eq(drawn("print"),
+              "error: 'print' needs 1 argument, got 0 arguments\n --> line:1:1\n  |\n1 | print\n  | ^^^^^")
+
+@test
+a_surplus_argument_is_drawn_under_the_surplus() =
+    assert_eq(drawn("print 1 2"),
+              "error: 'print' needs 1 argument, got 2 arguments\n --> line:1:9\n  |\n1 | print 1 2\n  |         ^")
+
+@test
+a_definition_with_no_name_points_at_what_was_there_instead() =
+    assert_eq(drawn("to 1"),
+              "error: 'to' needs a name, not 1\n --> line:1:4\n  |\n1 | to 1\n  |    ^")
+
+// **The evaluator has nothing to point at, and that is the design rather than a gap.** `Expr` carries
+// no spans, so a fault about what a value came to renders as its sentence -- which is what makes
+// `report` the one call a console needs.
+@test
+a_refusal_from_running_renders_as_its_sentence_alone() =
+    assert_eq(drawn_run("print 1 / 0"), "that divides by zero")
+
+@test
+a_refusal_from_reading_a_held_line_points_at_the_line_it_is_on() =
+    assert_eq(drawn("to twice :n\noutput n * *\nend"),
+              "error: '*' needs something in front of it\n --> line:2:12\n  |\n2 | output n * *\n  |            ^")
+
+// --- Numbers ------------------------------------------------------------------------------------
+
+// **A separator between digits is a number, which the hand-rolled reader refused.** It falls out of
+// `read_digits` and is kept deliberately: what it replaces was an error, so nothing can have depended
+// on the old answer.
+@test
+an_underscore_may_separate_digits() =
+    assert_eq(printed("print 1_000"), "1000")
+
+// **The bound is the type's and not a digit count.** Eighteen digits always fit and nineteen sometimes
+// do, so a reader capped at eighteen refused numbers that were perfectly good -- and the largest one
+// there is has nineteen.
+@test
+the_largest_number_there_is_reads_as_itself() =
+    assert_eq(printed("print 9223372036854775807"), "9223372036854775807")
+
+@test
+one_past_the_largest_number_is_refused() =
+    assert_eq(printed("print 9223372036854775808"), "error: that number is too large")
+
+// **A radix prefix is not Ogol's, and taking `read_integer` would have made it so.** What the reader
+// asks for is a run of decimal digits, so `0x10` is a number with an `x` after it exactly as it was.
+@test
+a_radix_prefix_is_not_part_of_the_language() =
+    assert_eq(printed("print 0x10"), "error: 'x' cannot follow a number")
+
+// --- Binding power --------------------------------------------------------------------------------
+
+@test
+multiplication_binds_more_tightly_than_addition() =
+    assert_eq(printed("print 2 + 3 * 4"), "14")
+
+@test
+subtraction_groups_to_the_left() =
+    assert_eq(printed("print 8 - 4 - 2"), "2")
+
+@test
+division_groups_to_the_left() =
+    assert_eq(printed("print 12 / 3 / 2"), "2")
+
+@test
+a_comparison_binds_loosest_of_all() =
+    assert_eq(printed("print 1 + 2 > 2"), "true")
+
+@test
+a_negation_takes_an_operand_and_not_a_sum() =
+    assert_eq(printed("print - 2 * 3"), "-6")
+
+@test
+brackets_override_binding_power() =
+    assert_eq(printed("print (1 + 2) * 3"), "9")
+
+@test
+nothing_may_be_negated_twice() =
+    assert_eq(printed("print - - 1"), "error: '-' needs something in front of it")
+
+// **An operator with nothing after it asks for more rather than complaining**, which is what makes a
+// console offer a continuation prompt instead of a refusal: `1 +` on its own line is unfinished, not
+// wrong, and the next line may hold the rest of it.
+@test
+an_operator_with_nothing_after_it_asks_for_more() =
+    assert_eq(printed("print 1 +"), "error: the line stops in the middle of something")
+
+// **The minus rule survives the move to a binding-power loop**, where it used to be a `break` in the
+// middle of the sum reader and is now a power of zero. The two spellings still read as two programs.
+@test
+a_minus_with_space_on_its_left_only_opens_an_argument() =
+    assert_eq(printed("print 5 -1"),
+              "error: 'print' needs 1 argument, got 2 arguments -- '-1' reads as a negative number, and '- 1' as a subtraction")
+
+@test
+a_minus_with_space_both_sides_subtracts() =
+    assert_eq(printed("print 5 - 1"), "4")
+
+@test
+a_minus_with_space_on_neither_side_subtracts() =
+    assert_eq(printed("print 5-1"), "4")
+
+// --- Depth ----------------------------------------------------------------------------------------
+
+@test
+a_deeply_nested_expression_is_refused_rather_than_taking_the_stack() =
+    var src = "print "
+
+    for _ in 0..<80
+        src = src + "("
+
+    src = src + "1"
+
+    for _ in 0..<80
+        src = src + ")"
+
+    assert_eq(printed(src), "error: that is nested too deeply")
+
+// **The depth counter has to come back down through a refusal the reader CATCHES**, which a bracket's
+// body reading is the only one of. `nud` and `datum` lower it in a wrapper, so that a `?` in the body
+// cannot leave it raised; without that, a leak of one level per bracket would refuse the sixty-fifth
+// of these. Checked by removing the decrement, which turns this red.
+@test
+a_bracket_whose_body_does_not_parse_leaves_the_depth_where_it_found_it() =
+    var src = ""
+
+    for _ in 0..<80
+        src = src + "print [+]\n"
+
+    var want = ""
+
+    for _ in 0..<80
+        if want != "" then want = want + "\n"
+
+        want = want + "+"
+
+    assert_eq(printed(src), want)
