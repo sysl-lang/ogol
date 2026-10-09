@@ -112,7 +112,7 @@ that at the point of the mistake.
 
 ```
 dependencies {
-  ogol { git = "github.com/sysl-lang/ogol", version = "0.3.1" }
+  ogol { git = "github.com/sysl-lang/ogol", version = "0.3.2" }
 }
 ```
 

@@ -78,7 +78,7 @@ private const max_depth: usize = 64
 // **A minus with a space on its left and none on its right answers 0**, which is what stops the loop
 // -- and is the same decision the old `sum` made with a `break`. It is not an operator at all there:
 // it opens the next argument, and `pin 15 -1` passes two of them.
-private lbp(t: Spanned[Token]) -> u8
+private lbp(t: Spanned[Token]) -> u16
     t.value match
         Operator("=") -> 1
         Operator("<>") -> 1
