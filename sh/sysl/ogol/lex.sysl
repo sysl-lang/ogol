@@ -49,7 +49,7 @@ end Token
 // A token as it was written, for a diagnostic that has to quote what it found.
 spell(t: Token) -> string
     t match
-        Number(n) -> str(n)
+        Number(n) -> n.to_string()
         Quoted(s) -> s"\"$s"
         Param(s) -> s":$s"
         Name(s) -> s

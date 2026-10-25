@@ -39,7 +39,7 @@ end Value
 render(v: Value) -> string
     v match
         Nothing -> ""
-        Num(n) -> str(n)
+        Num(n) -> n.to_string()
         Word(s) -> s
         Bool(b) -> if b then "true" else "false"
         // **A list renders without its own brackets and a nested one with them**, which is Logo's
