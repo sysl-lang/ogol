@@ -62,7 +62,7 @@ struct Procs
 
     find(self, name: string) -> Option[&Proc]
         for i in 0..<self.items.len()
-            if self.items.at(i).name == name then return Some(self.items.at(i))
+            if self.items[i].name == name then return Some(self.items[i])
 
         None
     end find
@@ -71,8 +71,8 @@ struct Procs
     // the old one lingering under the new. It is the same rule Logo's `to` has always had.
     define(*self, p: &Proc)
         for i in 0..<self.items.len()
-            if self.items.at(i).name == p.name
-                self.items.set(i, p)
+            if self.items[i].name == p.name
+                self.items[i] = p
                 return
 
         self.items.push(p)
@@ -83,7 +83,7 @@ struct Procs
     // parse must not leave the name behind it.
     forget(*self, name: string)
         for i in 0..<self.items.len()
-            if self.items.at(i).name == name
+            if self.items[i].name == name
                 self.items.remove(i)
                 return
     end forget

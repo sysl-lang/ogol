@@ -8,18 +8,18 @@
 // This is the block a *consumer* writes to reach it:
 //
 //     dependencies {
-//       ogol { git = "github.com/sysl-lang/ogol", version = "0.3.3" }
+//       ogol { git = "github.com/sysl-lang/ogol", version = "0.3.4" }
 //     }
 //
 // The coordinate names the package, `ogol`; the module a program imports is `sh.sysl.ogol`.
 
 package {
   name    = "ogol"
-  version = "0.3.3"
+  version = "0.3.4"
 
-  // **The oldest compiler this builds with.** The sources spell number-to-text as `.to_string()`,
-  // which 0.6.0 introduced.
-  sysl = "0.6.0"
+  // **The oldest compiler this builds with.** The sources index a `Buf` as `x[i]`, which 0.9.0
+  // made the only spelling.
+  sysl = "0.9.0"
 }
 
 // **The reader is `sh.sysl.parsing`'s, not this package's.** A byte cursor, a span, a line-start
@@ -36,7 +36,7 @@ package {
 // `sysl build-c <program> --target thumb-freestanding-softfp`, and it belongs in the loop of any
 // change here that adds a module-level binding.
 dependencies {
-  parsing { git = "github.com/sysl-lang/parsing", version = "0.13.2" }
+  parsing { git = "github.com/sysl-lang/parsing", version = "0.14.1" }
 }
 
 // **`heap = true`, and it is a decision rather than an oversight.** An interpreter grows a token

@@ -424,9 +424,9 @@ a_procedure_defined_on_one_line_is_there_on_the_next() =
 
     i.quiet = true
 
-    run(i, "to double :n output n * 2 end")
-    run(i, "set x 4")
-    run(i, "print double x")
+    _ = run(i, "to double :n output n * 2 end")
+    _ = run(i, "set x 4")
+    _ = run(i, "print double x")
 
     assert_eq(transcript(i), "8")
 

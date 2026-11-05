@@ -63,7 +63,7 @@ private render_items(v: Value) -> string
             for k in 0..<items.len()
                 if k > 0 then out = out + " "
 
-                out = out + bracketed(items.at(k))
+                out = out + bracketed(items[k])
 
             out
         _ -> render(v)
@@ -116,7 +116,7 @@ same(a: Value, b: Value) -> bool
                 if xs.len() != ys.len() then return false
 
                 for k in 0..<xs.len()
-                    if !same(xs.at(k), ys.at(k)) then return false
+                    if !same(xs[k], ys[k]) then return false
 
                 true
             _ -> false

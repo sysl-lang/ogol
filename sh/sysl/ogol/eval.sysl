@@ -19,7 +19,7 @@ struct Frame
 
     find(self, name: string) -> Option[usize]
         for i in 0..<self.names.len()
-            if self.names.at(i) == name then return Some(i)
+            if self.names[i] == name then return Some(i)
 
         None
     end find
@@ -62,7 +62,7 @@ transcript(i: &Ogol) -> string
 
     for k in 0..<i.out.len()
         if k > 0 then out = out + "\n"
-        out = out + i.out.at(k)
+        out = out + i.out[k]
 
     out
 end transcript
@@ -72,17 +72,17 @@ end transcript
 // and nothing of whoever called it. That is a departure, and it is the one that makes a procedure
 // readable on its own.
 private innermost(i: &Ogol) -> &Frame =
-    if i.frames.len() == 0 then i.globals else i.frames.at(i.frames.len() - 1)
+    if i.frames.len() == 0 then i.globals else i.frames[i.frames.len() - 1]
 
 lookup(i: &Ogol, name: string) -> Option[Value]
     var f = innermost(i)
 
     f.find(name) match
-        Some(k) -> return Some(f.vals.at(k))
+        Some(k) -> return Some(f.vals[k])
         None -> ()
 
     i.globals.find(name) match
-        Some(k) -> Some(i.globals.vals.at(k))
+        Some(k) -> Some(i.globals.vals[k])
         None -> None
 end lookup
 
@@ -94,12 +94,12 @@ assign(i: &Ogol, name: string, v: Value)
 
     f.find(name) match
         Some(k) ->
-            f.vals.set(k, v)
+            f.vals[k] = v
             return
         None -> ()
 
     i.globals.find(name) match
-        Some(k) -> i.globals.vals.set(k, v)
+        Some(k) -> i.globals.vals[k] = v
         None ->
             i.globals.names.push(name)
             i.globals.vals.push(v)
@@ -206,7 +206,7 @@ run_body(i: &Ogol, body: &Buf[&Expr]) -> Result[Value, Fault]
     for k in 0..<body.len()
         if i.returning then break
 
-        last = eval(i, body.at(k))?
+        last = eval(i, body[k])?
 
     Ok(last)
 end run_body
@@ -220,7 +220,7 @@ end run_body
 
 // The single argument almost all of these take, evaluated and insisted on being a value.
 private one(i: &Ogol, args: &Buf[&Expr]) -> Result[Value, Fault]
-    wants_value(eval(i, args.at(0))?, "this")
+    wants_value(eval(i, args[0])?, "this")
 
 // The character at `k` of a word, as a word of its own.
 private char_word(s: string, k: usize) -> Value
@@ -239,7 +239,7 @@ private first_of(v: Value) -> Result[Value, Fault]
         List(items) ->
             if items.is_empty() then return Err(Bad("'first' of an empty list"))
 
-            Ok(items.at(0))
+            Ok(items[0])
         Word(s) ->
             if s == "" then return Err(Bad("'first' of an empty word"))
 
@@ -252,7 +252,7 @@ private last_of(v: Value) -> Result[Value, Fault]
         List(items) ->
             if items.is_empty() then return Err(Bad("'last' of an empty list"))
 
-            Ok(items.at(items.len() - 1))
+            Ok(items[items.len() - 1])
         Word(s) ->
             if s == "" then return Err(Bad("'last' of an empty word"))
 
@@ -269,7 +269,7 @@ private but_first_of(v: Value) -> Result[Value, Fault]
 
             var out: &Buf[Value] = buf()
 
-            for k in 1..<items.len() do out.push(items.at(k))
+            for k in 1..<items.len() do out.push(items[k])
             Ok(List(out))
         Word(s) ->
             if s == "" then return Err(Bad("'butfirst' of an empty word"))
@@ -285,7 +285,7 @@ private but_last_of(v: Value) -> Result[Value, Fault]
 
             var out: &Buf[Value] = buf()
 
-            for k in 0..<items.len() - 1 do out.push(items.at(k))
+            for k in 0..<items.len() - 1 do out.push(items[k])
             Ok(List(out))
         Word(s) ->
             if s == "" then return Err(Bad("'butlast' of an empty word"))
@@ -317,7 +317,7 @@ private item_of(n: long, v: Value) -> Result[Value, Fault]
             if k >= items.len() then
                 return Err(Bad(s"'item' was asked for $n of a list of ${items.len()}"))
 
-            Ok(items.at(k))
+            Ok(items[k])
         Word(s) ->
             if k >= s.chars.count() then
                 return Err(Bad(s"'item' was asked for $n of a word of ${s.chars.count()}"))
@@ -368,8 +368,8 @@ private apply(i: &Ogol, p: &Proc, args: &Buf[&Expr]) -> Result[Value, Fault]
     var f = frame()
 
     for k in 0..<args.len()
-        f.names.push(p.params.at(k))
-        f.vals.push(wants_value(eval(i, args.at(k))?, s"'${p.name}'")?)
+        f.names.push(p.params[k])
+        f.vals.push(wants_value(eval(i, args[k])?, s"'${p.name}'")?)
 
     i.frames.push(f)
     i.depth += 1
@@ -396,7 +396,7 @@ end apply
 private builtin(i: &Ogol, name: string, args: &Buf[&Expr]) -> Result[Value, Fault]
     name match
         "print" ->
-            var v = wants_value(eval(i, args.at(0))?, "'print'")?
+            var v = wants_value(eval(i, args[0])?, "'print'")?
             var line = render(v)
 
             i.out.push(line)
@@ -430,35 +430,35 @@ private builtin(i: &Ogol, name: string, args: &Buf[&Expr]) -> Result[Value, Faul
         // they meet any other. `item 0` says so rather than reading as the last element or as an
         // empty answer.
         "item" ->
-            val n = number(eval(i, args.at(0))?, "item", "left")?
-            val v = wants_value(eval(i, args.at(1))?, "'item'")?
+            val n = number(eval(i, args[0])?, "item", "left")?
+            val v = wants_value(eval(i, args[1])?, "'item'")?
 
             item_of(n, v)
 
         // `fput` puts one element on the front and `lput` on the back. Both answer a **new** list:
         // nothing in Ogol mutates a value, so a name still holds what it held.
         "fput" ->
-            val head = wants_value(eval(i, args.at(0))?, "'fput'")?
-            val rest = wants_value(eval(i, args.at(1))?, "'fput'")?
+            val head = wants_value(eval(i, args[0])?, "'fput'")?
+            val rest = wants_value(eval(i, args[1])?, "'fput'")?
 
             rest match
                 List(items) ->
                     var out: &Buf[Value] = buf()
 
                     out.push(head)
-                    for k in 0..<items.len() do out.push(items.at(k))
+                    for k in 0..<items.len() do out.push(items[k])
                     Ok(List(out))
                 _ -> Err(Bad(s"'fput' needs a list to put onto, not ${kind(rest)}"))
 
         "lput" ->
-            val tail = wants_value(eval(i, args.at(0))?, "'lput'")?
-            val rest = wants_value(eval(i, args.at(1))?, "'lput'")?
+            val tail = wants_value(eval(i, args[0])?, "'lput'")?
+            val rest = wants_value(eval(i, args[1])?, "'lput'")?
 
             rest match
                 List(items) ->
                     var out: &Buf[Value] = buf()
 
-                    for k in 0..<items.len() do out.push(items.at(k))
+                    for k in 0..<items.len() do out.push(items[k])
                     out.push(tail)
                     Ok(List(out))
                 _ -> Err(Bad(s"'lput' needs a list to put onto, not ${kind(rest)}"))
@@ -467,8 +467,8 @@ private builtin(i: &Ogol, name: string, args: &Buf[&Expr]) -> Result[Value, Faul
         // else here does: arity is what lets the grammar go without brackets, so a variadic name
         // could not be read.
         "list" ->
-            val a = wants_value(eval(i, args.at(0))?, "'list'")?
-            val b = wants_value(eval(i, args.at(1))?, "'list'")?
+            val a = wants_value(eval(i, args[0])?, "'list'")?
+            val b = wants_value(eval(i, args[1])?, "'list'")?
 
             var out: &Buf[Value] = buf()
 
@@ -492,14 +492,14 @@ private builtin(i: &Ogol, name: string, args: &Buf[&Expr]) -> Result[Value, Faul
                 _ -> Ok(Bool(false))
 
         "output" ->
-            i.answer = wants_value(eval(i, args.at(0))?, "'output'")?
+            i.answer = wants_value(eval(i, args[0])?, "'output'")?
             i.returning = true
             Ok(Nothing)
 
         "repeat" ->
-            var n = eval(i, args.at(0))?
+            var n = eval(i, args[0])?
             var count = number(n, "repeat", "left")?
-            var body = block_of(args.at(1), "'repeat'")?
+            var body = block_of(args[1], "'repeat'")?
 
             var k: long = 0
 
@@ -510,17 +510,17 @@ private builtin(i: &Ogol, name: string, args: &Buf[&Expr]) -> Result[Value, Faul
             Ok(Nothing)
 
         "if" ->
-            var test = boolean(eval(i, args.at(0))?, "'if'")?
-            var body = block_of(args.at(1), "'if'")?
+            var test = boolean(eval(i, args[0])?, "'if'")?
+            var body = block_of(args[1], "'if'")?
 
             if test then run_body(i, body)?
 
             Ok(Nothing)
 
         _ ->
-            var test = boolean(eval(i, args.at(0))?, "'ifelse'")?
-            var yes = block_of(args.at(1), "'ifelse'")?
-            var no = block_of(args.at(2), "'ifelse'")?
+            var test = boolean(eval(i, args[0])?, "'ifelse'")?
+            var yes = block_of(args[1], "'ifelse'")?
+            var no = block_of(args[2], "'ifelse'")?
 
             run_body(i, if test then yes else no)?
 
