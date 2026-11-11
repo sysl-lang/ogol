@@ -36,7 +36,7 @@ package {
 // `sysl build-c <program> --target thumb-freestanding-softfp`, and it belongs in the loop of any
 // change here that adds a module-level binding.
 dependencies {
-  parsing { git = "github.com/sysl-lang/parsing", version = "0.14.1" }
+  parsing { git = "github.com/sysl-lang/parsing", version = "0.14.2" }
 }
 
 // **`heap = true`, and it is a decision rather than an oversight.** An interpreter grows a token
